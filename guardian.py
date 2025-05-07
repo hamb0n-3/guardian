@@ -231,19 +231,18 @@ def print_finding(severity, title, description, recommendation="N/A"):
     print("-" * 60)
 
 def display_summary(final_findings, final_statistics):
-    """Displays a summary of findings and statistics from managed dicts."""
+    """Displays a summary of findings and statistics from managed dicts,
+    with interactive drill-down for detailed findings."""
     print(f"\n{COLOR_CYAN}{COLOR_BOLD}--- Scan Summary ---{COLOR_RESET}")
 
     # Findings Summary
     print(f"{COLOR_YELLOW}{COLOR_BOLD}Findings by Severity:{COLOR_RESET}")
-    # Convert managed list proxy to list for reliable length check and iteration
     total_findings = sum(len(list(v)) for v in final_findings.values())
     if total_findings == 0:
         print(f"  {COLOR_GREEN}No significant security findings reported.{COLOR_RESET}")
     else:
-        severity_order = [SEVERITY_CRITICAL, SEVERITY_HIGH, SEVERITY_MEDIUM, SEVERITY_LOW, SEVERITY_INFO]
-        for severity in severity_order:
-            # Convert managed list proxy to list for len()
+        severity_order_for_summary = [SEVERITY_CRITICAL, SEVERITY_HIGH, SEVERITY_MEDIUM, SEVERITY_LOW, SEVERITY_INFO]
+        for severity in severity_order_for_summary:
             count = len(list(final_findings.get(severity, [])))
             if count > 0:
                 color_map = {
@@ -355,16 +354,119 @@ def display_summary(final_findings, final_statistics):
     if not stats_printed:
         print(f"  {COLOR_YELLOW}No statistics gathered or modules run.{COLOR_RESET}")
 
-    # Detailed Findings
-    print(f"\n{COLOR_CYAN}{COLOR_BOLD}--- Detailed Findings ---{COLOR_RESET}")
+    # --- Interactive Detailed Findings ---
     if total_findings > 0:
-         severity_order = [SEVERITY_CRITICAL, SEVERITY_HIGH, SEVERITY_MEDIUM, SEVERITY_LOW, SEVERITY_INFO]
-         for severity in severity_order:
-             if final_findings[severity]:
-                 for finding in final_findings[severity]:
-                     print_finding(severity, finding['title'], finding['description'], finding.get('recommendation', 'N/A'))
-    else:
-        print(f"  {COLOR_GREEN}No detailed findings to display.{COLOR_RESET}")
+        print(f"\n{COLOR_CYAN}{COLOR_BOLD}--- Detailed Findings ---{COLOR_RESET}")
+        
+        severity_map = {
+            'C': SEVERITY_CRITICAL,
+            'H': SEVERITY_HIGH,
+            'M': SEVERITY_MEDIUM,
+            'L': SEVERITY_LOW,
+            'I': SEVERITY_INFO
+        }
+        # Order for displaying if 'All' is chosen
+        severity_display_order_all = [SEVERITY_CRITICAL, SEVERITY_HIGH, SEVERITY_MEDIUM, SEVERITY_LOW, SEVERITY_INFO]
+
+        while True: # Loop for iterative selection
+            prompt_message = (
+                f"\nSelect severities to view (e.g., C,H or M), or:\n"
+                f"  (C)ritical, (H)igh, (M)edium, (L)ow, (I)nfo\n"
+                f"  (A)ll findings, (Q)uit detailed view: "
+            )
+            
+            user_input_raw = ""
+            try:
+                user_input_raw = input(f"{COLOR_YELLOW}{prompt_message}{COLOR_RESET}").strip().upper()
+            except EOFError: # Non-interactive environment
+                print(f"  {COLOR_YELLOW}No input received (non-interactive environment?). Skipping interactive drill-down.{COLOR_RESET}")
+                print(f"  {COLOR_YELLOW}All findings are available in the JSON report.{COLOR_RESET}")
+                break # Exit the while loop
+            except Exception as e: # Catch other potential input errors
+                print(f"  {COLOR_RED}An error occurred during input: {e}. Skipping detailed findings.{COLOR_RESET}")
+                break # Exit the while loop
+
+            if not user_input_raw: # User pressed Enter without input
+                print(f"  {COLOR_YELLOW}No selection made. Please enter a valid option.{COLOR_RESET}")
+                continue # Continue to next iteration of the while loop
+
+            # Handle single char 'Q' or 'N' for quit, or 'A' for all, before splitting by comma
+            if user_input_raw == 'Q' or user_input_raw == 'N':
+                print(f"  {COLOR_GREEN}Exiting detailed findings view.{COLOR_RESET}")
+                break # Exit the while loop
+            
+            if user_input_raw == 'A':
+                print(f"  {COLOR_GREEN}Displaying all findings:{COLOR_RESET}")
+                any_displayed_for_all = False
+                for severity_level in severity_display_order_all:
+                    findings_for_level = final_findings.get(severity_level, [])
+                    if findings_for_level:
+                        print(f"  {COLOR_CYAN}--- Findings for {severity_level} ---{COLOR_RESET}")
+                        for finding in findings_for_level:
+                            print_finding(severity_level, finding['title'], finding['description'], finding.get('recommendation', 'N/A'))
+                            any_displayed_for_all = True
+                if not any_displayed_for_all:
+                    print(f"  {COLOR_GREEN}No findings were reported across all severities.{COLOR_RESET}")
+                break # Exit the while loop after 'A' (as 'All' is a terminal action for the loop)
+
+            # Process comma-separated inputs
+            choices = [choice.strip() for choice in user_input_raw.split(',')]
+            processed_any_valid_choice_this_iteration = False
+
+            for selected_severity_code in choices:
+                if not selected_severity_code: # Skip empty strings if input was e.g. "C,,"
+                    continue
+
+                # Check again for Q/N/A within comma-separated values, though less conventional.
+                # Primary handling for these is as standalone inputs.
+                if selected_severity_code == 'Q' or selected_severity_code == 'N':
+                    print(f"  {COLOR_GREEN}Exiting detailed findings view (Quit signal found in list).{COLOR_RESET}")
+                    return # Exit display_summary function entirely if Q/N found within list
+                
+                if selected_severity_code == 'A':
+                    print(f"  {COLOR_GREEN}Displaying all findings (All signal found in list):{COLOR_RESET}")
+                    # This inner 'A' will also display all and then we should break the outer loop.
+                    # To avoid deep breaks, just call the 'A' logic and then return from display_summary.
+                    # This means an 'A' within a list like "C,A,H" will show C, then all, then stop.
+                    all_displayed = False
+                    for sev_level in severity_display_order_all:
+                        f_for_level = final_findings.get(sev_level, [])
+                        if f_for_level:
+                            print(f"  {COLOR_CYAN}--- Findings for {sev_level} ---{COLOR_RESET}")
+                            for f_item in f_for_level:
+                                print_finding(sev_level, f_item['title'], f_item['description'], f_item.get('recommendation', 'N/A'))
+                                all_displayed = True
+                    if not all_displayed:
+                        print(f"  {COLOR_GREEN}No findings were reported across all severities.{COLOR_RESET}")
+                    return # Exit display_summary function
+
+                mapped_severity = severity_map.get(selected_severity_code)
+
+                if mapped_severity:
+                    findings_for_level = final_findings.get(mapped_severity, [])
+                    if findings_for_level:
+                        print(f"  {COLOR_CYAN}--- Findings for {mapped_severity} ---{COLOR_RESET}")
+                        for finding in findings_for_level:
+                            print_finding(mapped_severity, finding['title'], finding['description'], finding.get('recommendation', 'N/A'))
+                        processed_any_valid_choice_this_iteration = True
+                    else:
+                        print(f"  {COLOR_YELLOW}No findings reported for severity '{selected_severity_code}' ({mapped_severity}).{COLOR_RESET}")
+                        processed_any_valid_choice_this_iteration = True # It was a valid code, just no findings
+                else:
+                    print(f"  {COLOR_RED}Warning: Unknown severity code '{selected_severity_code}'. It will be ignored.{COLOR_RESET}")
+            
+            if not processed_any_valid_choice_this_iteration and choices:
+                 # This means user entered something, but none of it was a recognized severity code
+                 # (or Q/A if we didn't handle them to break earlier)
+                 # The individual warnings for unknown codes would have already printed.
+                 # No additional general message needed here as specific errors are shown.
+                 pass 
+            # Loop continues for next prompt unless 'A' or 'Q'/"N" was processed to break/return.
+
+    elif total_findings == 0:
+        pass # Already handled by the initial check for total_findings
+    else: # Should not be reached
+        print(f"  {COLOR_GREEN}No findings reported by the scan.{COLOR_RESET}")
 
 
 # --- Logging Setup Function ---
