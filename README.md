@@ -1,53 +1,30 @@
-# Guardian Scanner
+# Guardian Network Scanner
 
 ```
 #############################################
-#            Guardian Scanner             #
-#        Advanced Defense & OPSEC         #
+#        Guardian Network Scanner         #
+#          Network Security Focus         #
 #############################################
 ```
 
-**Guardian is an advanced host and network defense scanner designed to provide in-depth security posture analysis with a focus on operational security (OPSEC) heuristics.**
+**Guardian is a network security scanner designed to provide in-depth security posture analysis of network configurations and listening services.**
 
-It gathers extensive system and network information, analyzes configurations, checks running processes, examines logs, and identifies potential vulnerabilities or misconfigurations based on security best practices and common attack vectors.
+It gathers network interface information, analyzes SSH configurations, examines authentication logs, and identifies potential vulnerabilities or misconfigurations related to network security.
 
 ## Features
 
-Guardian performs a wide range of checks, organized into modules:
+Guardian performs a range of network-focused checks, organized into modules:
 
-*   **System Information (`system_info.py`)**: Gathers OS details, kernel version, hostname, architecture, and resource utilization (CPU, Memory).
 *   **Network Scanning (`network_scan.py`)**:
     *   Identifies network interfaces and associated IP addresses (IPv4/IPv6).
     *   Discovers all listening TCP and UDP ports.
     *   Analyzes listening ports for risky services (e.g., Telnet, FTP), unencrypted protocols (HTTP), and services exposed on all interfaces.
-    *   Correlates listening ports with process IDs, names, and users.
-*   **Process Analysis (`process_analysis.py`)**:
-    *   Lists all running processes with details (PID, PPID, user, command line, CWD).
-    *   Identifies processes running as root (excluding common system processes).
-    *   Detects processes running from suspicious locations (e.g., `/tmp`, `/var/tmp`).
-    *   Flags potentially malicious command patterns (e.g., `nc` listeners, simple HTTP servers).
+    *   Correlates listening ports with process IDs, names, and users (requires appropriate permissions).
 *   **SSH Configuration Analysis (`ssh_analysis.py`)**:
-    *   Analyzes `/etc/ssh/sshd_config` for insecure settings (Protocol 1, root login, password authentication, empty passwords, X11 forwarding, weak crypto - *crypto checks planned*).
+    *   Analyzes `/etc/ssh/sshd_config` for insecure settings such as Protocol 1, root login, password authentication, empty passwords, and X11 forwarding.
     *   Checks settings like `MaxAuthTries`, `LoginGraceTime`, and client keep-alives.
-*   **User Account Analysis (`user_analysis.py`)**:
-    *   Analyzes `/etc/passwd` for non-root accounts with UID 0, non-standard shells, guessable usernames, and missing home directories.
-    *   Analyzes `/etc/shadow` (requires root) for accounts with empty password hashes and non-expiring passwords.
-    *   Performs basic checks on `/etc/sudoers` (requires root) for `NOPASSWD` entries and overly broad permissions.
-*   **File System Analysis (`file_system.py`)**:
-    *   Searches common system paths (`/etc`, `/var`, `/home`, etc.) for potentially sensitive file types (`.key`, `.pem`, `.sql`, config files, scripts, password files).
-    *   Identifies world-writable files.
-    *   Identifies world-writable directories *without* the sticky bit set.
-    *   Finds non-standard SUID/SGID files (excluding a common whitelist).
-    *   Detects files/directories with dangling ownership (UID/GID not present in `/etc/passwd` or `/etc/group`).
-*   **Kernel Parameter Analysis (`kernel_params.py`)**:
-    *   Checks critical `sysctl` parameters against security recommendations (e.g., ASLR, SYN cookies, IP forwarding, ICMP handling, RP filter, ptrace scope, user namespaces).
 *   **Log Analysis (`log_analysis.py`)**:
-    *   Analyzes `/var/log/auth.log` (or equivalent) for failed login attempts, successful SSH logins, and `sudo` command usage. (*More log sources and patterns planned*).
-*   **Systemd Analysis (`services_timers.py`)**:
-    *   Lists running systemd services and checks for units running from suspicious paths or known risky services.
-    *   Lists active systemd timers and flags potentially suspicious frequent execution intervals.
-*   **Environment Detection (`environment_detection.py`)**:
-    *   Attempts to detect if running inside a container (Docker, LXC, Kubernetes) or a virtual machine (KVM, VMware, VirtualBox, QEMU, Hyper-V) using various methods (`systemd-detect-virt`, cgroups, DMI, specific files).
+    *   Analyzes `/var/log/auth.log` (or equivalent system authentication log) for failed login attempts, successful SSH logins, and `sudo` command usage, providing insights into potential unauthorized access attempts or misuse.
 *   **Concurrency**: Utilizes Python's `multiprocessing` to run checks concurrently for improved performance.
 
 ## Requirements
@@ -57,12 +34,8 @@ Guardian performs a wide range of checks, organized into modules:
     ```bash
     pip install psutil
     ```
-*   **Permissions**: **Root privileges** are highly recommended for a complete scan. Many checks (reading shadow file, analyzing sudoers, accessing all process details, checking certain sysctl parameters, using `dmidecode`) require root access. The script will run without root but will produce incomplete results and warnings.
-*   **External Commands (Optional but Recommended)**:
-    *   `systemd-detect-virt` (for reliable VM/container detection)
-    *   `dmidecode` (for VM detection via DMI - requires root)
-    *   `systemctl` (for service/timer analysis)
-    *   `sysctl` (for kernel parameter analysis)
+*   **Permissions**: **Root privileges** are highly recommended for a complete scan. Some checks, like accessing all process details for network connections or reading specific log files (e.g. `/etc/shadow` if `log_analysis` were to expand to it, or `/etc/sudoers` for `user_analysis` if it were present), require root access. The script will run without root but may produce incomplete results and warnings for certain checks.
+*   **External Commands**: None required for the current set of network-focused modules.
 
 ## Installation
 
@@ -121,36 +94,27 @@ try:
 
     with open(report_file, "w") as f:
         json.dump(report_data, f, indent=4, default=default_serializer)
-    print(f"
-[+] Full report saved to {report_file}")
+    print(f"\n[+] Full report saved to {report_file}")
 except Exception as e:
-    print(f"
-{COLOR_RED}Error saving report: {e}{COLOR_RESET}")
+    print(f"\n{COLOR_RED}Error saving report: {e}{COLOR_RESET}")
 ```
 
 ## Modules Overview
 
 The core logic is broken down into modules within the `modules/` directory:
 
-*   `utils.py`: Shared constants (colors, severities) and helper functions (`run_command`).
-*   `system_info.py`: Basic OS and hardware info.
+*   `utils.py`: Shared constants (colors, severities).
 *   `network_scan.py`: Interface, IP, and listening port scanning.
-*   `process_analysis.py`: Running process enumeration and analysis.
 *   `ssh_analysis.py`: SSH daemon configuration checks.
-*   `user_analysis.py`: User account, password policy, and sudoers analysis.
-*   `file_system.py`: Sensitive file and insecure permission scanning.
-*   `kernel_params.py`: `sysctl` security parameter checks.
 *   `log_analysis.py`: Authentication log checks.
-*   `services_timers.py`: Systemd service and timer checks.
-*   `environment_detection.py`: Container/VM detection.
 
 ## OPSEC Considerations
 
-*   **Privileges**: Running as root provides the most comprehensive scan but also carries inherent risks. Understand why root is needed for specific checks.
-*   **Network Impact**: The network scanning components are passive (checking local listening ports and interfaces), but future additions might include active scanning. Be mindful of network policies.
-*   **System Load**: File system scanning and process iteration can be resource-intensive, especially on systems with many files or processes. The use of multiprocessing helps, but be aware of potential load during the scan.
-*   **Log Noise**: Some checks, especially informational ones, can generate significant output. The findings are prioritized by severity.
-*   **False Positives/Negatives**: While efforts are made to be accurate, security scanning can sometimes produce false positives (flagging something benign) or miss things (false negatives). Results should always be reviewed and correlated with other information.
+*   **Privileges**: Running as root provides the most comprehensive scan (e.g., for correlating network services to PIDs and users, or accessing restricted log files) but also carries inherent risks.
+*   **Network Impact**: The current network scanning components are passive (checking local listening ports and interfaces). Be mindful of network policies if active scanning capabilities are added in the future.
+*   **System Load**: While less intensive than full system scans, network and log analysis can still consume resources. The use of multiprocessing helps, but be aware of potential load.
+*   **Log Noise**: Some checks, especially informational ones from log analysis, can generate significant output. The findings are prioritized by severity.
+*   **False Positives/Negatives**: While efforts are made to be accurate, security scanning can sometimes produce false positives or miss things. Results should always be reviewed and correlated with other information.
 
 ## Contributing
 
@@ -160,9 +124,8 @@ Contributions are welcome! Please feel free to open issues or submit pull reques
 *   Adding new checks and modules
 *   Improving existing detection logic (e.g., more robust regex, better platform compatibility)
 *   Enhancing reporting and output formatting
-*   Adding support for different operating systems or init systems
+*   Adding support for different operating systems or log formats
 
 ## License
 
-*(Specify License Here - e.g., MIT License, Apache 2.0, or state if unlicensed)*
-Currently unlicensed. 
+This project is licensed under the MIT License.

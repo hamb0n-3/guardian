@@ -3,12 +3,12 @@
 #Author: hamb0n-3
 
 """
-Guardian: Advanced Host and Network Defense Scanner (Multiprocess Enabled)
+Guardian: Network Security Scanner (Multiprocess Enabled)
 
-This script orchestrates various modules to gather system and network
+This script orchestrates various network security modules to gather network
 information, analyze it for potential security vulnerabilities and
 misconfigurations, and provide actionable findings with a focus on
-operational security heuristics.
+network security heuristics.
 """
 
 import os
@@ -27,17 +27,10 @@ from modules.utils import (
 )
 
 # Import scanning/analysis modules (will be called via wrappers)
-from modules import system_info
 from modules import network_scan
-from modules import process_analysis
 from modules import ssh_analysis
-from modules import user_analysis
-from modules import file_system
-from modules import kernel_params
 # Import newly added modules
 from modules import log_analysis
-from modules import services_timers
-from modules import environment_detection
 
 # --- Process-Safe Finding Adder ---
 def add_finding_mp(managed_findings, severity, title, description, recommendation="N/A"):
@@ -73,18 +66,6 @@ def add_finding_mp(managed_findings, severity, title, description, recommendatio
 # IMPORTANT: The actual module functions need to be updated to accept
 # (managed_stats, managed_findings, add_finding_func, *original_args)
 
-def run_system_info_wrapper(managed_stats, managed_findings):
-    # Obtain a logger specific to this wrapper function
-    logger = logging.getLogger(f"guardian.{run_system_info_wrapper.__name__}")
-    module_name = system_info.get_system_info.__name__
-    try:
-        logger.info(f"Starting module: {module_name}")
-        system_info.get_system_info(managed_stats, managed_findings, add_finding_mp)
-        logger.info(f"Finished module: {module_name}")
-    except Exception as e:
-        logger.error(f"Process Error in {module_name}: {e}")
-        add_finding_mp(managed_findings, SEVERITY_HIGH, f"Module Error: {module_name}", f"Failed to run: {e}")
-
 def run_network_scan_wrapper(managed_stats, managed_findings):
     # Obtain a logger specific to this wrapper function
     logger = logging.getLogger(f"guardian.{run_network_scan_wrapper.__name__}")
@@ -98,18 +79,6 @@ def run_network_scan_wrapper(managed_stats, managed_findings):
         logger.error(f"Process Error in {module_name}: {e}")
         add_finding_mp(managed_findings, SEVERITY_HIGH, f"Module Error: {module_name}", f"Failed to run: {e}")
 
-def run_process_analysis_wrapper(managed_stats, managed_findings):
-    # Obtain a logger specific to this wrapper function
-    logger = logging.getLogger(f"guardian.{run_process_analysis_wrapper.__name__}")
-    module_name = process_analysis.get_running_processes.__name__
-    try:
-        logger.info(f"Starting module: {module_name}")
-        process_analysis.get_running_processes(managed_stats, managed_findings, add_finding_mp)
-        logger.info(f"Finished module: {module_name}")
-    except Exception as e:
-        logger.error(f"Process Error in {module_name}: {e}")
-        add_finding_mp(managed_findings, SEVERITY_HIGH, f"Module Error: {module_name}", f"Failed to run: {e}")
-
 def run_ssh_analysis_wrapper(managed_stats, managed_findings):
     # Obtain a logger specific to this wrapper function
     logger = logging.getLogger(f"guardian.{run_ssh_analysis_wrapper.__name__}")
@@ -117,43 +86,6 @@ def run_ssh_analysis_wrapper(managed_stats, managed_findings):
     try:
         logger.info(f"Starting module: {module_name}")
         ssh_analysis.check_ssh_config(managed_stats, managed_findings, add_finding_mp)
-        logger.info(f"Finished module: {module_name}")
-    except Exception as e:
-        logger.error(f"Process Error in {module_name}: {e}")
-        add_finding_mp(managed_findings, SEVERITY_HIGH, f"Module Error: {module_name}", f"Failed to run: {e}")
-
-def run_user_analysis_wrapper(managed_stats, managed_findings):
-    # Obtain a logger specific to this wrapper function
-    logger = logging.getLogger(f"guardian.{run_user_analysis_wrapper.__name__}")
-    module_name = user_analysis.check_user_accounts.__name__
-    try:
-        logger.info(f"Starting module: {module_name}")
-        user_analysis.check_user_accounts(managed_stats, managed_findings, add_finding_mp)
-        logger.info(f"Finished module: {module_name}")
-    except Exception as e:
-        logger.error(f"Process Error in {module_name}: {e}")
-        add_finding_mp(managed_findings, SEVERITY_HIGH, f"Module Error: {module_name}", f"Failed to run: {e}")
-
-def run_file_system_scan_wrapper(managed_stats, managed_findings):
-    # Obtain a logger specific to this wrapper function
-    logger = logging.getLogger(f"guardian.{run_file_system_scan_wrapper.__name__}")
-    module_name = file_system.find_sensitive_files_and_permissions.__name__
-    try:
-        logger.info(f"Starting module: {module_name}")
-        # Can pass specific args here if needed, e.g., search_paths, max_depth
-        file_system.find_sensitive_files_and_permissions(managed_stats, managed_findings, add_finding_mp)
-        logger.info(f"Finished module: {module_name}")
-    except Exception as e:
-        logger.error(f"Process Error in {module_name}: {e}")
-        add_finding_mp(managed_findings, SEVERITY_HIGH, f"Module Error: {module_name}", f"Failed to run: {e}")
-
-def run_kernel_params_wrapper(managed_stats, managed_findings):
-    # Obtain a logger specific to this wrapper function
-    logger = logging.getLogger(f"guardian.{run_kernel_params_wrapper.__name__}")
-    module_name = kernel_params.check_kernel_parameters.__name__
-    try:
-        logger.info(f"Starting module: {module_name}")
-        kernel_params.check_kernel_parameters(managed_stats, managed_findings, add_finding_mp)
         logger.info(f"Finished module: {module_name}")
     except Exception as e:
         logger.error(f"Process Error in {module_name}: {e}")
@@ -175,42 +107,14 @@ def run_log_analysis_wrapper(managed_stats, managed_findings):
         logger.error(f"Process Error in {module_name}: {e}")
         add_finding_mp(managed_findings, SEVERITY_HIGH, f"Module Error: {module_name}", f"Failed to run: {e}")
 
-def run_services_timers_wrapper(managed_stats, managed_findings):
-    """Wrapper to run the services and timers check module in a separate process."""
-    # Obtain a logger specific to this wrapper function
-    logger = logging.getLogger(f"guardian.{run_services_timers_wrapper.__name__}")
-    module_name = "services_timers (systemd)"
-    try:
-        logger.info(f"Starting module: {module_name}")
-        # Call the primary function from the services_timers module
-        services_timers.check_systemd_units(managed_stats, managed_findings, add_finding_mp)
-        logger.info(f"Finished module: {module_name}")
-    except Exception as e:
-        logger.error(f"Process Error in {module_name}: {e}")
-        add_finding_mp(managed_findings, SEVERITY_HIGH, f"Module Error: {module_name}", f"Failed to run: {e}")
-
-def run_environment_detection_wrapper(managed_stats, managed_findings):
-    """Wrapper to run the environment detection module in a separate process."""
-    # Obtain a logger specific to this wrapper function
-    logger = logging.getLogger(f"guardian.{run_environment_detection_wrapper.__name__}")
-    module_name = "environment_detection (VM/Container)"
-    try:
-        logger.info(f"Starting module: {module_name}")
-        # Call the primary function from the environment_detection module
-        environment_detection.detect_environment(managed_stats, managed_findings, add_finding_mp)
-        logger.info(f"Finished module: {module_name}")
-    except Exception as e:
-        logger.error(f"Process Error in {module_name}: {e}")
-        add_finding_mp(managed_findings, SEVERITY_HIGH, f"Module Error: {module_name}", f"Failed to run: {e}")
-
 # --- Helper Functions (Output Formatting) ---
 
 def print_banner():
     """Prints a cool banner for the script."""
     print(f"{COLOR_CYAN}{COLOR_BOLD}")
     print("#############################################")
-    print("#            Guardian Scanner             #")
-    print("#        Advanced Defense & OPSEC         #")
+    print("#        Guardian Network Scanner         #") # Updated Banner
+    print("#          Network Security Focus         #") # Updated Banner
     print("#############################################")
     print(f"{COLOR_RESET}")
 
@@ -260,12 +164,8 @@ def display_summary(final_findings, final_statistics):
     stats_printed = False
     # Convert managed dict proxy for reliable access
     stats_copy = dict(final_statistics)
+    stats_printed = False # Initialize stats_printed
 
-    if 'system' in stats_copy:
-        sys_stats = stats_copy['system'] # Already a dict if populated correctly
-        print(f"  System: {sys_stats.get('os_name', 'N/A')} {sys_stats.get('os_version', 'N/A')} ({sys_stats.get('hostname', 'N/A')})")
-        print(f"  CPU/Mem Usage: {sys_stats.get('cpu_percent', 'N/A')}% / {sys_stats.get('memory_used_percent', 'N/A')}%")
-        stats_printed = True
     if 'network' in stats_copy:
         net_stats = stats_copy['network']
         if 'interfaces' in net_stats:
@@ -274,55 +174,12 @@ def display_summary(final_findings, final_statistics):
         if 'listening_ports_count' in net_stats:
             print(f"  Listening Ports: {net_stats.get('listening_ports_count', 0)} found")
         stats_printed = True
-    if 'processes' in stats_copy:
-        proc_stats = stats_copy['processes']
-        if 'count' in proc_stats:
-            print(f"  Running Processes: {proc_stats.get('count', 0)} found")
-        stats_printed = True
-    if 'users' in stats_copy:
-        user_stats = stats_copy['users']
-        # Access list proxies safely
-        print(f"  User Accounts (/etc/passwd): {len(list(user_stats.get('accounts', [])))}")
-        sudo_rules_count = len(list(user_stats.get('sudo_rules', [])))
-        if sudo_rules_count > 0:
-             print(f"  Potentially Risky Sudo Rules: {sudo_rules_count} flagged")
-        stats_printed = True
+
     if 'ssh_config' in stats_copy:
         ssh_stats = stats_copy['ssh_config']
         if ssh_stats.get('exists'):
              print(f"  SSH Config: Analyzed {ssh_stats.get('path', 'N/A')}")
              stats_printed = True
-    if 'files' in stats_copy:
-        file_stats = stats_copy['files']
-        counts = {
-            'Sensitive Files': len(list(file_stats.get('sensitive_files_found', []))),
-            'World-Writable Files': len(list(file_stats.get('world_writable_files', []))),
-            'World-Writable Dirs (No Sticky)': len(list(file_stats.get('world_writable_dirs_no_sticky', []))),
-            'Non-Standard SUID/SGID': len(list(file_stats.get('suid_sgid_files', []))),
-            'Dangling Ownership': len(list(file_stats.get('dangling_files', [])))
-        }
-        for name, count in counts.items():
-            if count > 0:
-                print(f"  File System: {name}: {count} found")
-                stats_printed = True
-    if 'kernel_params' in stats_copy:
-        kp_stats = stats_copy['kernel_params']
-        checked = kp_stats.get('checked_count', 0)
-        errors = len(list(kp_stats.get('errors', [])))
-        print(f"  Kernel Params (sysctl): {checked} checked", end='')
-        if errors > 0:
-            print(f" ({errors} errors/warnings)")
-        else:
-            print()
-        stats_printed = True
-
-    # --- NEW Module Statistics ---
-    if 'environment' in stats_copy:
-        env_stats = stats_copy['environment']
-        detection_method = env_stats.get('detection_method', 'N/A')
-        env_type = env_stats.get('type', 'Bare Metal / Unknown')
-        print(f"  Environment: {env_type} (Detected via: {detection_method})")
-        stats_printed = True
 
     if 'logs' in stats_copy:
         log_stats = stats_copy['logs']
@@ -331,28 +188,18 @@ def display_summary(final_findings, final_statistics):
              analyzed_path = auth_stats.get('analyzed_path', '/var/log/auth.log')
              lines = auth_stats.get('lines_processed', 0)
              failed_logins = len(list(auth_stats.get('failed_logins', [])))
-             sudo_events = len(list(auth_stats.get('sudo_events', [])))
+             # sudo_events related to log_analysis can remain if relevant to network context (e.g. remote sudo)
+             sudo_events = len(list(auth_stats.get('sudo_events', []))) # Keep if network relevant
              ssh_logins = len(list(auth_stats.get('ssh_logins', [])))
              print(f"  Log Analysis ({os.path.basename(analyzed_path)}): {lines} lines processed")
              if failed_logins > 0: print(f"    Failed Logins Found: {failed_logins}")
-             if sudo_events > 0: print(f"    Sudo Events Found: {sudo_events}")
+             if sudo_events > 0: print(f"    Sudo Events (from logs): {sudo_events}") # Clarify origin
              if ssh_logins > 0: print(f"    SSH Logins Found: {ssh_logins}")
              stats_printed = True
-
-    if 'services' in stats_copy:
-        svc_stats = stats_copy['services']
-        units_checked = svc_stats.get('units_checked_count', 0)
-        timers_checked = svc_stats.get('timers_checked_count', 0)
-        risky_services = len(list(svc_stats.get('risky_services_found', [])))
-        frequent_timers = len(list(svc_stats.get('frequent_timers_found', [])))
-        print(f"  Systemd Units: {units_checked} services checked, {timers_checked} timers checked")
-        if risky_services > 0: print(f"    Potentially Risky Services: {risky_services}")
-        if frequent_timers > 0: print(f"    Frequent Timers Flagged: {frequent_timers}")
-        stats_printed = True
-    # --- End NEW Module Statistics ---
+    # Removed 'services' and 'environment' sections from summary as per refactoring goal
 
     if not stats_printed:
-        print(f"  {COLOR_YELLOW}No statistics gathered or modules run.{COLOR_RESET}")
+        print(f"  {COLOR_YELLOW}No network-related statistics gathered or modules run.{COLOR_RESET}")
 
     # --- Interactive Detailed Findings ---
     if total_findings > 0:
@@ -524,7 +371,7 @@ def main():
     # --- Argument Parsing for Logging and other controls ---
     # This parser will handle command-line arguments, starting with logging controls.
     parser = argparse.ArgumentParser(
-        description="Guardian: Advanced Host and Network Defense Scanner.",
+        description="Guardian: Network Security Scanner.", # Updated Description
         formatter_class=argparse.RawTextHelpFormatter # Allows for better help text formatting
     )
     parser.add_argument(
@@ -592,18 +439,10 @@ def main():
         # --- Define Processes for Modules --- #
         # List the WRAPPER functions to run
         modules_to_run = [
-            run_system_info_wrapper,
             run_network_scan_wrapper,
-            run_process_analysis_wrapper,
             run_ssh_analysis_wrapper,
-            run_user_analysis_wrapper,
-            run_file_system_scan_wrapper,
-            run_kernel_params_wrapper,
-            # --- Add NEW module wrappers ---
             run_log_analysis_wrapper,
-            run_services_timers_wrapper,
-            run_environment_detection_wrapper,
-            # Add future module wrappers here
+            # Non-network modules and their wrappers are removed
         ]
 
         processes = []
