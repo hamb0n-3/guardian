@@ -8,6 +8,16 @@ Guardian Module: MITM Detector (ARP Cache Analysis)
 import psutil
 import platform
 import re
+import socket
+import os # For resolv.conf parsing
+
+try:
+    import dns.resolver
+    import dns.exception
+    DNSPYTHON_AVAILABLE = True
+except ImportError:
+    DNSPYTHON_AVAILABLE = False
+
 from modules.utils import (
     COLOR_GREEN, COLOR_RED, COLOR_YELLOW, COLOR_RESET,
     SEVERITY_INFO, SEVERITY_LOW, SEVERITY_MEDIUM, SEVERITY_HIGH, SEVERITY_CRITICAL,
@@ -177,6 +187,148 @@ def detect_arp_cache_anomalies(managed_stats, managed_findings, add_finding_func
     managed_stats['mitm_detection']['arp_cache_analysis'] = arp_analysis_stats
     print(f"{COLOR_GREEN}[+] ARP cache analysis completed.{COLOR_RESET}")
 
+def detect_dns_spoofing(managed_stats, managed_findings, add_finding_func):
+    """
+    Detects potential DNS spoofing by comparing results from system DNS and public DNS servers.
+    """
+    print(f"{COLOR_GREEN}[*] Analyzing DNS for potential spoofing...{COLOR_RESET}")
+
+    if not DNSPYTHON_AVAILABLE:
+        error_msg = "DNSPython library not found. DNS Spoofing detection skipped."
+        print(f"{COLOR_RED}Error: {error_msg}{COLOR_RESET}")
+        add_finding_func(managed_findings, SEVERITY_HIGH, "DNS Spoofing Detection Error", error_msg,
+                         "Please install dnspython (e.g., pip install dnspython) to enable this check.")
+        # Initialize stats structure even if skipped
+        if 'mitm_detection' not in managed_stats:
+            managed_stats['mitm_detection'] = {}
+        managed_stats['mitm_detection']['dns_spoofing'] = {
+            'status': 'skipped',
+            'error_message': error_msg,
+            'checks': [],
+            'anomalies_found': 0,
+            'system_servers': []
+        }
+        return
+
+    domains_to_test = ['www.google.com', 'www.example.com', 'www.wikipedia.org']
+    public_dns_servers = ['8.8.8.8', '1.1.1.1'] # Google DNS, Cloudflare DNS
+    
+    dns_spoof_stats = {
+        'checks': [], 
+        'anomalies_found': 0, 
+        'system_servers': [],
+        'status': 'completed',
+        'error_message': None
+    }
+
+    # Get System DNS Servers
+    system_dns_servers = []
+    system = platform.system()
+    if system == "Linux" or system == "Darwin": # Darwin is macOS
+        try:
+            with open("/etc/resolv.conf", "r") as f:
+                for line in f:
+                    if line.strip().startswith("nameserver"):
+                        parts = line.strip().split()
+                        if len(parts) > 1:
+                            system_dns_servers.append(parts[1])
+        except FileNotFoundError:
+            add_finding_func(managed_findings, SEVERITY_LOW, "DNS System Config", "/etc/resolv.conf not found.")
+        except Exception as e:
+            add_finding_func(managed_findings, SEVERITY_LOW, "DNS System Config Error", f"Error reading /etc/resolv.conf: {e}")
+    elif system == "Windows":
+        try:
+            success, output = run_command(["ipconfig", "/all"], timeout=10)
+            if success and output:
+                # Regex to find DNS server lines, which may appear multiple times
+                # Example: "   DNS Servers . . . . . . . . . . . : 192.168.1.1"
+                #          "                                       1.1.1.1" (additional server on next line)
+                # This regex is simplified and might need refinement for complex Windows setups.
+                # It looks for lines starting with "DNS Servers" and captures the IP.
+                # Then it looks for subsequent lines that are just IPs.
+                dns_lines = re.findall(r"(?:DNS Servers[\s.:]*([\d\.]+)|^\s+([\d\.]+))", output, re.MULTILINE)
+                for primary_dns, secondary_dns in dns_lines:
+                    if primary_dns: # From "DNS Servers ..." line
+                        system_dns_servers.append(primary_dns)
+                    if secondary_dns: # From subsequent lines with just an IP
+                        system_dns_servers.append(secondary_dns)
+                # Remove duplicates if any from regex capture groups
+                system_dns_servers = sorted(list(set(s for s in system_dns_servers if s))) # Filter out empty strings
+            else:
+                add_finding_func(managed_findings, SEVERITY_LOW, "DNS System Config", "Failed to run ipconfig /all or no output.")
+        except Exception as e:
+            add_finding_func(managed_findings, SEVERITY_LOW, "DNS System Config Error", f"Error running ipconfig /all: {e}")
+
+    dns_spoof_stats['system_servers'] = system_dns_servers
+    if not system_dns_servers:
+        add_finding_func(managed_findings, SEVERITY_LOW, "DNS System Config", "No system DNS servers found/parsed. Comparison will rely on socket.gethostbyname_ex vs public DNS.")
+    else:
+        add_finding_func(managed_findings, SEVERITY_INFO, "System DNS Servers", f"Found system DNS servers: {', '.join(system_dns_servers)}")
+
+
+    # Perform Lookups and Compare
+    for domain in domains_to_test:
+        domain_check_result = {'domain': domain, 'system_resolver_ips': [], 'public_resolver_ips': {}}
+        system_ips_set = set()
+
+        # System Resolver (using socket.gethostbyname_ex for default system resolution)
+        try:
+            _, _, system_ips_list = socket.gethostbyname_ex(domain)
+            system_ips_set = set(system_ips_list)
+            domain_check_result['system_resolver_ips'] = sorted(list(system_ips_set))
+        except socket.gaierror as e:
+            add_finding_func(managed_findings, SEVERITY_LOW, f"DNS Lookup Failed (System): {domain}", f"System resolver could not resolve {domain}: {e}")
+        except Exception as e_sys: # Catch any other unexpected error during system resolution
+            add_finding_func(managed_findings, SEVERITY_LOW, f"DNS Lookup Error (System): {domain}", f"Unexpected error for {domain} with system resolver: {e_sys}")
+
+
+        # Public Resolvers
+        for server_ip in public_dns_servers:
+            public_ips_for_server_set = set()
+            try:
+                resolver = dns.resolver.Resolver()
+                resolver.nameservers = [server_ip]
+                resolver.timeout = 2.0
+                resolver.lifetime = 2.0
+                answers = resolver.resolve(domain, 'A')
+                for rdata in answers:
+                    public_ips_for_server_set.add(rdata.address)
+                domain_check_result['public_resolver_ips'][server_ip] = sorted(list(public_ips_for_server_set))
+            except dns.resolver.NXDOMAIN:
+                add_finding_func(managed_findings, SEVERITY_LOW, f"DNS NXDOMAIN (Public: {server_ip}): {domain}", f"{domain} does not exist according to {server_ip}.")
+                domain_check_result['public_resolver_ips'][server_ip] = ["NXDOMAIN"]
+            except dns.resolver.Timeout:
+                add_finding_func(managed_findings, SEVERITY_LOW, f"DNS Timeout (Public: {server_ip}): {domain}", f"Query to {server_ip} for {domain} timed out.")
+                domain_check_result['public_resolver_ips'][server_ip] = ["Timeout"]
+            except dns.exception.DNSException as e:
+                add_finding_func(managed_findings, SEVERITY_LOW, f"DNS Error (Public: {server_ip}): {domain}", f"DNS query to {server_ip} for {domain} failed: {e}")
+                domain_check_result['public_resolver_ips'][server_ip] = [f"Error: {type(e).__name__}"]
+
+
+        # Comparison Logic
+        if system_ips_set: # Only compare if system resolver returned something
+            for public_server, public_ips_list in domain_check_result['public_resolver_ips'].items():
+                # Ensure public_ips_list doesn't contain error strings like "NXDOMAIN" or "Timeout" before converting to set for comparison
+                valid_public_ips_set = set(ip for ip in public_ips_list if not (ip in ["NXDOMAIN", "Timeout"] or ip.startswith("Error:")))
+                
+                if valid_public_ips_set and (system_ips_set != valid_public_ips_set):
+                    dns_spoof_stats['anomalies_found'] += 1
+                    msg = (f"Potential DNS Spoofing for {domain}: System resolver IPs ({', '.join(sorted(list(system_ips_set)))}) "
+                           f"differ from {public_server} IPs ({', '.join(sorted(list(valid_public_ips_set)))}).")
+                    rec = "Verify your network's DNS configuration and investigate potential local DNS manipulation or upstream DNS issues."
+                    add_finding_func(managed_findings, SEVERITY_HIGH, "Potential DNS Spoofing Detected", msg, rec)
+        
+        dns_spoof_stats['checks'].append(domain_check_result)
+
+    # Store final stats
+    if 'mitm_detection' not in managed_stats: # Ensure base key exists
+        managed_stats['mitm_detection'] = {}
+    managed_stats['mitm_detection']['dns_spoofing'] = dns_spoof_stats
+    
+    summary_msg = f"DNS spoofing checks completed. Anomalies found: {dns_spoof_stats['anomalies_found']}."
+    add_finding_func(managed_findings, SEVERITY_INFO, "DNS Spoofing Check Summary", summary_msg)
+    print(f"{COLOR_GREEN}[+] {summary_msg}{COLOR_RESET}")
+
 
 if __name__ == '__main__':
     print("This module is intended to be run as part of the Guardian scanner.")
@@ -185,10 +337,8 @@ if __name__ == '__main__':
     class MockManagerDict(dict):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
-            # Emulate a nested structure if a key like 'mitm_detection' is accessed
-            if 'mitm_detection' not in self:
+            if 'mitm_detection' not in self: # Ensure the nested structure expected by the module
                 self['mitm_detection'] = MockManagerDict()
-
 
     class MockManagerList:
         def __init__(self): self._list = []
@@ -200,10 +350,8 @@ if __name__ == '__main__':
         SEVERITY_MEDIUM: MockManagerList(), SEVERITY_HIGH: MockManagerList(),
         SEVERITY_CRITICAL: MockManagerList()
     }
-    # Initialize managed_stats as the main script would for this module path
     mock_stats_store = MockManagerDict()
-    mock_stats_store['mitm_detection'] = MockManagerDict() 
-
+    # mock_stats_store['mitm_detection'] is auto-created by MockManagerDict if accessed.
 
     def mock_add_finding(findings_dict, severity, title, description, recommendation="N/A"):
         print(f"  FINDING [{severity}]: {title} - {description} (Rec: {recommendation})")
@@ -211,25 +359,47 @@ if __name__ == '__main__':
             findings_dict[severity].append({'title': title, 'description': description, 'recommendation': recommendation})
 
     print("\n--- Running Mock ARP Cache Anomaly Detection ---")
-    # To test this, your system needs a default gateway and some ARP entries.
-    # The output of `arp -n` (Linux/macOS) or `arp -a` (Windows) will be used.
     try:
         detect_arp_cache_anomalies(mock_stats_store, mock_findings_store, mock_add_finding)
     except Exception as e:
         print(f"Error during mock ARP analysis: {e}")
+    
+    print("\n--- Running Mock DNS Spoofing Detection ---")
+    try:
+        detect_dns_spoofing(mock_stats_store, mock_findings_store, mock_add_finding)
+    except Exception as e:
+        print(f"Error during mock DNS Spoofing analysis: {e}")
 
-    print("\n--- Mock Stats from ARP Analysis ---")
-    arp_stats = mock_stats_store.get('mitm_detection', {}).get('arp_cache_analysis', {})
-    if arp_stats:
-        for key, value in arp_stats.items():
-            print(f"  {key}: {value}")
+
+    print("\n--- Mock Stats from MiTM Detection ---")
+    mitm_stats = mock_stats_store.get('mitm_detection', {})
+    if mitm_stats.get('arp_cache_analysis'):
+        print("  ARP Cache Analysis Stats:")
+        for key, value in mitm_stats['arp_cache_analysis'].items():
+            print(f"    {key}: {value}")
     else:
         print("  No ARP analysis stats found.")
+    
+    if mitm_stats.get('dns_spoofing'):
+        print("  DNS Spoofing Stats:")
+        dns_stats_display = mitm_stats['dns_spoofing']
+        print(f"    Status: {dns_stats_display.get('status')}")
+        if dns_stats_display.get('error_message'):
+             print(f"    Error Message: {dns_stats_display.get('error_message')}")
+        print(f"    Anomalies Found: {dns_stats_display.get('anomalies_found')}")
+        print(f"    System Servers: {dns_stats_display.get('system_servers')}")
+        print(f"    Checks Performed: {len(dns_stats_display.get('checks', []))}")
+        # Optionally print details of first check if needed for debugging
+        # if dns_stats_display.get('checks'):
+        #    print(f"      Example Check (www.google.com): {dns_stats_display['checks'][0]}")
+    else:
+        print("  No DNS Spoofing stats found.")
 
-    print("\n--- Mock Findings from ARP Analysis ---")
+
+    print("\n--- Mock Findings from MiTM Detection ---")
     for severity, findings_list in mock_findings_store.items():
-        if findings_list._list:
+        if findings_list._list: # Check if list is not empty
             print(f"  {severity.upper()} Findings:")
-            for finding in findings_list._list:
+            for finding in findings_list._list: # Iterate through actual items
                 print(f"    - {finding['title']}")
-    print("\nNote: Standalone test depends on live system ARP cache and gateway configuration.")
+    print("\nNote: Standalone test depends on live system configuration and network conditions.")

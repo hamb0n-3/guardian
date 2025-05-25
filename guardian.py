@@ -160,6 +160,19 @@ def run_arp_detection_wrapper(managed_stats, managed_findings):
         logger.error(f"Process Error in {module_name}: {e}")
         add_finding_mp(managed_findings, SEVERITY_HIGH, f"Module Error: {module_name}", f"Failed to run: {e}")
 
+def run_dns_spoofing_detection_wrapper(managed_stats, managed_findings):
+    """Wrapper to run the DNS Spoofing detection module."""
+    logger = logging.getLogger(f"guardian.{run_dns_spoofing_detection_wrapper.__name__}")
+    module_name = "dns_spoofing_detection"
+    try:
+        logger.info(f"Starting module: {module_name}")
+        # managed_stats['mitm_detection'] is initialized in main()
+        mitm_detector.detect_dns_spoofing(managed_stats, managed_findings, add_finding_mp)
+        logger.info(f"Finished module: {module_name}")
+    except Exception as e:
+        logger.error(f"Process Error in {module_name}: {e}")
+        add_finding_mp(managed_findings, SEVERITY_HIGH, f"Module Error: {module_name}", f"Failed to run: {e}")
+
 # --- Helper Functions (Output Formatting) ---
 
 def print_banner():
@@ -324,6 +337,33 @@ def display_summary(final_findings, final_statistics):
             # and the error message about not finding gateway would be more relevant.
         else: # arp_stats is None or empty dictionary
             print(f"  {COLOR_YELLOW}ARP analysis data is missing or incomplete.{COLOR_RESET}")
+        stats_printed = True
+
+    if 'mitm_detection' in stats_copy and 'dns_spoofing' in stats_copy['mitm_detection']:
+        dns_stats = stats_copy['mitm_detection']['dns_spoofing']
+        print(f"\n{COLOR_YELLOW}{COLOR_BOLD}DNS Spoofing Analysis:{COLOR_RESET}")
+        if dns_stats.get('status') == 'skipped' and dns_stats.get('error_message'): # Check for skipped status
+            print(f"  {COLOR_YELLOW}Skipped: {dns_stats['error_message']}{COLOR_RESET}")
+        elif dns_stats.get('error_message'): # General errors during execution
+            print(f"  {COLOR_RED}Error: {dns_stats['error_message']}{COLOR_RESET}")
+        else:
+            system_servers = dns_stats.get('system_servers', [])
+            if system_servers:
+                print(f"  System DNS Servers Found: {', '.join(system_servers)}")
+            else:
+                # This case might be covered by a finding from the module itself if /etc/resolv.conf was unreadable etc.
+                # Or if system resolver is used without explicit servers.
+                print(f"  {COLOR_YELLOW}Note: System DNS servers list might be empty if relying on implicit system resolver or parsing failed.{COLOR_RESET}")
+
+            if dns_stats.get('anomalies_found', 0) > 0:
+                print(f"  {COLOR_RED}Alert: Potential DNS spoofing anomalies detected! Review findings for details on specific domains.{COLOR_RESET}")
+            
+            # Optional: Detailed checks summary (already in findings)
+            # total_domains_checked = len(dns_stats.get('checks', []))
+            # print(f"  Domains Checked: {total_domains_checked}")
+            
+            if dns_stats.get('anomalies_found', 0) == 0 and not dns_stats.get('error_message') and dns_stats.get('status') != 'skipped':
+                 print(f"  {COLOR_GREEN}No direct DNS resolution discrepancies found for tested domains against public resolvers.{COLOR_RESET}")
         stats_printed = True
     # Removed 'services' and 'environment' sections from summary as per refactoring goal
 
@@ -573,7 +613,8 @@ def main():
             run_ssh_analysis_wrapper,
             run_log_analysis_wrapper,
             run_local_traffic_analysis_wrapper,
-            run_arp_detection_wrapper, # Add new ARP detection wrapper
+            run_arp_detection_wrapper, 
+            run_dns_spoofing_detection_wrapper, # Add new DNS spoofing detection wrapper
             # Non-network modules and their wrappers are removed
         ]
 

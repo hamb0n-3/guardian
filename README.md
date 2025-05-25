@@ -7,9 +7,9 @@
 #############################################
 ```
 
-**Guardian is a network security scanner designed to provide in-depth security posture analysis of network configurations, listening services, active local network traffic, and remote targets. It also includes capabilities to detect potential ARP spoofing on the local network.**
+**Guardian is a network security scanner designed to provide in-depth security posture analysis of network configurations, listening services, active local network traffic, and remote targets. It also includes capabilities to detect potential ARP and DNS spoofing on the local network.**
 
-It gathers network interface information, analyzes SSH configurations, examines authentication logs, summarizes active local connections, traces routes to external targets, profiles remote hosts by scanning common ports, analyzes the local ARP cache for anomalies, and identifies potential vulnerabilities or misconfigurations related to network security.
+It gathers network interface information, analyzes SSH configurations, examines authentication logs, summarizes active local connections, traces routes to external targets, profiles remote hosts by scanning common ports, analyzes the local ARP cache for anomalies, compares DNS resolutions to detect potential spoofing, and identifies potential vulnerabilities or misconfigurations related to network security.
 
 ## Features
 
@@ -35,14 +35,23 @@ Guardian performs a range of network-focused checks, organized into modules:
     *   Attempts to grab service banners from open ports to identify running services.
 *   **MiTM Detection (`mitm_detector.py`)**:
     *   **ARP Cache Analysis**: Detects potential ARP spoofing by checking for multiple MAC addresses associated with the default gateway IP in the local ARP cache.
+    *   **DNS Spoofing Detection**: Compares DNS resolutions for a set of common domains between the system's configured DNS resolver and known public DNS servers. Discrepancies are flagged as potential DNS spoofing. Requires the `dnspython` library to be installed.
 *   **Concurrency**: Utilizes Python's `multiprocessing` to run checks concurrently for improved performance.
 
 ## Requirements
 
 *   **Python**: Python 3.6+
-*   **Libraries**: `psutil`
+*   **Libraries**:
+    *   `psutil` (for core network and process information)
+    *   `dnspython` (optional, for DNS Spoofing Detection feature)
     ```bash
-    pip install psutil
+    pip install psutil dnspython
+    ```
+    Alternatively, if `dnspython` is considered truly optional for a basic run:
+    ```bash
+    pip install psutil  # Core dependency
+    # For DNS Spoofing Detection:
+    pip install dnspython
     ```
 *   **Permissions**: **Root privileges** are highly recommended for a complete scan. Some checks, like accessing all process details for network connections or reading specific log files (e.g. `/etc/shadow` if `log_analysis` were to expand to it, or `/etc/sudoers` for `user_analysis` if it were present), require root access. The script will run without root but may produce incomplete results and warnings for certain checks.
 *   **External Commands**: None required for the current set of network-focused modules.
@@ -55,10 +64,11 @@ Guardian performs a range of network-focused checks, organized into modules:
     cd guardian-scanner # Or your directory name
     ```
 2.  **Install requirements:**
+    If a `requirements.txt` file is present and lists `psutil` and `dnspython`:
     ```bash
     pip install -r requirements.txt
     ```
-    (Or manually: `pip install psutil`)
+    Otherwise, install manually as shown in the Libraries subsection above.
 
 ## Usage
 
@@ -72,7 +82,8 @@ To utilize the traceroute and target profiling features, specify a target host:
 ```bash
 sudo python3 guardian.py --target-host <hostname_or_IP>
 ```
-The `--target-host` argument is required for the traceroute and remote target profiling modules to run. Other local scan modules, including ARP spoofing detection, will run regardless of this argument. ARP detection benefits from root/administrator privileges for reliable ARP table access.
+The `--target-host` argument is required for the traceroute and remote target profiling modules to run. Other local scan modules, including ARP and DNS spoofing detection, will run regardless of this argument. ARP and DNS detection benefit from root/administrator privileges for reliable system information access.
+The DNS Spoofing Detection module runs by default but will skip its checks and issue a warning if the `dnspython` library is not installed.
 
 **Output:**
 
@@ -125,7 +136,7 @@ The core logic is broken down into modules within the `modules/` directory:
 *   `ssh_analysis.py`: SSH daemon configuration checks.
 *   `log_analysis.py`: Authentication log checks.
 *   `target_profiler.py`: Remote target port scanning and banner grabbing.
-*   `mitm_detector.py`: ARP cache analysis for detecting potential ARP spoofing.
+*   `mitm_detector.py`: ARP cache analysis and DNS spoofing detection.
 
 ## OPSEC Considerations
 
