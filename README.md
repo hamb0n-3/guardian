@@ -7,9 +7,9 @@
 #############################################
 ```
 
-**Guardian is a network security scanner designed to provide in-depth security posture analysis of network configurations, listening services, active local network traffic, and remote targets. It also includes capabilities to detect potential ARP and DNS spoofing on the local network, and analyze SSL/TLS certificates of remote services.**
+**Guardian is a network security scanner designed to provide in-depth security posture analysis of network configurations, listening services, active local network traffic, and remote targets. It also includes capabilities to detect potential ARP and DNS spoofing on the local network, analyze SSL/TLS certificates of remote services, and identify local or (experimentally) remote interfaces operating in promiscuous mode.**
 
-It gathers network interface information, analyzes SSH configurations, examines authentication logs, summarizes active local connections, traces routes to external targets, profiles remote hosts by scanning common ports (including SSL/TLS certificate analysis for HTTPS services), analyzes the local ARP cache for anomalies, compares DNS resolutions to detect potential spoofing, and identifies potential vulnerabilities or misconfigurations related to network security.
+It gathers network interface information, analyzes SSH configurations, examines authentication logs, summarizes active local connections, traces routes to external targets, profiles remote hosts by scanning common ports (including SSL/TLS certificate analysis for HTTPS services), analyzes the local ARP cache for anomalies, compares DNS resolutions to detect potential spoofing, checks for local promiscuous mode interfaces, and (experimentally) probes remote targets for promiscuous mode. This helps identify potential vulnerabilities or misconfigurations related to network security and potential sniffing activities.
 
 ## Features
 
@@ -37,6 +37,8 @@ Guardian performs a range of network-focused checks, organized into modules:
 *   **MiTM Detection (`mitm_detector.py`)**:
     *   **ARP Cache Analysis**: Detects potential ARP spoofing by checking for multiple MAC addresses associated with the default gateway IP in the local ARP cache.
     *   **DNS Spoofing Detection**: Compares DNS resolutions for a set of common domains between the system's configured DNS resolver and known public DNS servers. Discrepancies are flagged as potential DNS spoofing. Requires the `dnspython` library to be installed.
+    *   **Local Promiscuous Mode Detection**: Checks local network interfaces for promiscuous mode using OS-specific commands. Highlights interfaces that are capturing all traffic on their network segment.
+    *   **Remote Promiscuous Mode Detection (Experimental)**: Attempts to detect if a remote target (specified by `--target-host`) might be in promiscuous mode by sending a specially crafted ICMP echo request (ping with a bogus destination MAC address). This test is indicative, not definitive, and requires the `scapy` library to be installed.
 *   **Concurrency**: Utilizes Python's `multiprocessing` to run checks concurrently for improved performance.
 
 ## Requirements
@@ -45,17 +47,20 @@ Guardian performs a range of network-focused checks, organized into modules:
 *   **Libraries**:
     *   `psutil` (for core network and process information)
     *   `dnspython` (optional, for DNS Spoofing Detection feature)
+    *   `scapy` (optional, for experimental Remote Promiscuous Mode Detection feature)
     ```bash
-    pip install psutil dnspython
+    pip install psutil dnspython scapy
     ```
-    Alternatively, if `dnspython` is considered truly optional for a basic run:
+    Alternatively, install individually:
     ```bash
     pip install psutil  # Core dependency
     # For DNS Spoofing Detection:
     pip install dnspython
+    # For Remote Promiscuous Mode Detection (Experimental):
+    pip install scapy
     ```
-*   **Permissions**: **Root privileges** are highly recommended for a complete scan. Some checks, like accessing all process details for network connections or reading specific log files (e.g. `/etc/shadow` if `log_analysis` were to expand to it, or `/etc/sudoers` for `user_analysis` if it were present), require root access. The script will run without root but may produce incomplete results and warnings for certain checks.
-*   **External Commands**: None required for the current set of network-focused modules.
+*   **Permissions**: **Root privileges** are highly recommended for a complete scan. Some checks, like accessing all process details for network connections, reading specific log files, reliable ARP table access, and raw socket operations for Scapy, require root access. The script will run without root but may produce incomplete results and warnings for certain checks.
+*   **External Commands**: None required for the current set of network-focused modules. (Note: Scapy itself might have underlying dependencies like Npcap on Windows for raw packet capabilities).
 
 ## Installation
 
@@ -65,7 +70,7 @@ Guardian performs a range of network-focused checks, organized into modules:
     cd guardian-scanner # Or your directory name
     ```
 2.  **Install requirements:**
-    If a `requirements.txt` file is present and lists `psutil` and `dnspython`:
+    If a `requirements.txt` file is present and lists `psutil`, `dnspython`, and `scapy`:
     ```bash
     pip install -r requirements.txt
     ```
@@ -83,8 +88,10 @@ To utilize the traceroute and target profiling features, specify a target host:
 ```bash
 sudo python3 guardian.py --target-host <hostname_or_IP>
 ```
-The `--target-host` argument is required for the traceroute and remote target profiling modules (including SSL/TLS analysis) to run. Other local scan modules, including ARP and DNS spoofing detection, will run regardless of this argument. ARP and DNS detection benefit from root/administrator privileges for reliable system information access.
-The DNS Spoofing Detection module runs by default but will skip its checks and issue a warning if the `dnspython` library is not installed.
+The `--target-host` argument is required for the traceroute, remote target profiling (including SSL/TLS analysis), and experimental remote promiscuous mode detection modules to run.
+Other local scan modules, including ARP cache analysis, DNS spoofing detection, and local promiscuous mode detection, will run regardless of this argument.
+Most detection modules (ARP, DNS, promiscuous mode) benefit from root/administrator privileges for reliable system information access and raw socket operations (for Scapy).
+The DNS Spoofing Detection module runs by default but will skip its checks and issue a warning if the `dnspython` library is not installed. Similarly, the Remote Promiscuous Mode Detection will be skipped if `scapy` is not available or if the target is not specified.
 
 **Output:**
 
@@ -137,16 +144,17 @@ The core logic is broken down into modules within the `modules/` directory:
 *   `ssh_analysis.py`: SSH daemon configuration checks.
 *   `log_analysis.py`: Authentication log checks.
 *   `target_profiler.py`: Remote target port scanning, banner grabbing, and SSL/TLS certificate analysis.
-*   `mitm_detector.py`: ARP cache analysis and DNS spoofing detection.
+*   `mitm_detector.py`: ARP cache analysis, DNS spoofing detection, local promiscuous mode detection, and experimental remote promiscuous mode detection.
 
 ## OPSEC Considerations
 
-*   **Privileges**: Running as root provides the most comprehensive scan (e.g., for correlating network services to PIDs and users, or accessing restricted log files) but also carries inherent risks.
+*   **Privileges**: Running as root provides the most comprehensive scan (e.g., for correlating network services to PIDs and users, accessing restricted log files, using raw sockets for Scapy) but also carries inherent risks.
 *   **Network Impact (Passive vs. Active)**:
-    *   Most local scanning components are passive (checking local listening ports, interfaces, configurations, logs).
-    *   **Active Measures**: The **traceroute** and **target profiling** (port scanning, banner grabbing) features are *active* measures.
+    *   Most local scanning components are passive (checking local listening ports, interfaces, configurations, logs, ARP cache).
+    *   **Active Measures**: The **traceroute**, **target profiling** (port scanning, banner grabbing, SSL/TLS analysis), and **experimental remote promiscuous mode detection** features are *active* measures.
         *   Traceroute sends packets to discover routes and is generally considered low risk, but it does interact with intermediate network devices.
-        *   Port scanning a remote target is a direct interaction and **can be easily detected by the target system's firewalls, Intrusion Detection/Prevention Systems (IDS/IPS), and logging mechanisms.**
+        *   Port scanning and SSL/TLS certificate retrieval involve direct interaction with the target and **can be easily detected by the target system's firewalls, Intrusion Detection/Prevention Systems (IDS/IPS), and logging mechanisms.**
+        *   The experimental remote promiscuous mode test sends a specifically crafted ICMP packet to the target, which could also be logged or detected.
         *   **Users must ensure they have explicit permission to scan any remote targets.** Unauthorized scanning can be unethical or illegal.
 *   **System Load**: While less intensive than full system scans, network and log analysis can still consume resources. The use of multiprocessing helps, but be aware of potential load.
 *   **Log Noise**: Some checks, especially informational ones from log analysis or active connection listings, can generate significant output. The findings are prioritized by severity.

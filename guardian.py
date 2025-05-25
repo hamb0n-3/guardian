@@ -147,18 +147,27 @@ def run_target_profiling_wrapper(managed_stats, managed_findings, target_host):
         logger.error(f"Process Error in {module_name}: {e}")
         add_finding_mp(managed_findings, SEVERITY_HIGH, f"Module Error: {module_name}", f"Failed to run: {e}")
 
-def run_arp_detection_wrapper(managed_stats, managed_findings):
-    """Wrapper to run the ARP cache anomaly detection module."""
-    logger = logging.getLogger(f"guardian.{run_arp_detection_wrapper.__name__}")
-    module_name = "arp_cache_analysis"
+def run_local_mitm_detection_wrapper(managed_stats, managed_findings):
+    """Wrapper for local MiTM detection modules (ARP, Local Promiscuous Mode)."""
+    logger = logging.getLogger(f"guardian.{run_local_mitm_detection_wrapper.__name__}")
+    
+    module_name_arp = "arp_cache_analysis"
     try:
-        logger.info(f"Starting module: {module_name}")
-        # managed_stats['mitm_detection'] should be initialized in main()
+        logger.info(f"Starting module: {module_name_arp}")
         mitm_detector.detect_arp_cache_anomalies(managed_stats, managed_findings, add_finding_mp)
-        logger.info(f"Finished module: {module_name}")
+        logger.info(f"Finished module: {module_name_arp}")
     except Exception as e:
-        logger.error(f"Process Error in {module_name}: {e}")
-        add_finding_mp(managed_findings, SEVERITY_HIGH, f"Module Error: {module_name}", f"Failed to run: {e}")
+        logger.error(f"Process Error in {module_name_arp}: {e}")
+        add_finding_mp(managed_findings, SEVERITY_HIGH, f"Module Error: {module_name_arp}", f"Failed to run: {e}")
+
+    module_name_local_promisc = "local_promiscuous_mode_detection"
+    try:
+        logger.info(f"Starting module: {module_name_local_promisc}")
+        mitm_detector.detect_local_promiscuous_mode(managed_stats, managed_findings, add_finding_mp)
+        logger.info(f"Finished module: {module_name_local_promisc}")
+    except Exception as e:
+        logger.error(f"Process Error in {module_name_local_promisc}: {e}")
+        add_finding_mp(managed_findings, SEVERITY_HIGH, f"Module Error: {module_name_local_promisc}", f"Failed to run: {e}")
 
 def run_dns_spoofing_detection_wrapper(managed_stats, managed_findings):
     """Wrapper to run the DNS Spoofing detection module."""
@@ -168,6 +177,19 @@ def run_dns_spoofing_detection_wrapper(managed_stats, managed_findings):
         logger.info(f"Starting module: {module_name}")
         # managed_stats['mitm_detection'] is initialized in main()
         mitm_detector.detect_dns_spoofing(managed_stats, managed_findings, add_finding_mp)
+        logger.info(f"Finished module: {module_name}")
+    except Exception as e:
+        logger.error(f"Process Error in {module_name}: {e}")
+        add_finding_mp(managed_findings, SEVERITY_HIGH, f"Module Error: {module_name}", f"Failed to run: {e}")
+
+def run_remote_promiscuous_detection_wrapper(managed_stats, managed_findings, target_host):
+    """Wrapper for experimental remote promiscuous mode detection."""
+    logger = logging.getLogger(f"guardian.{run_remote_promiscuous_detection_wrapper.__name__}")
+    module_name = f"remote_promiscuous_mode_detection for {target_host}"
+    try:
+        logger.info(f"Starting module: {module_name} (Experimental)")
+        # managed_stats['mitm_detection']['remote_promiscuous_mode'] is initialized in main()
+        mitm_detector.detect_remote_promiscuous_mode(managed_stats, managed_findings, add_finding_mp, target_host)
         logger.info(f"Finished module: {module_name}")
     except Exception as e:
         logger.error(f"Process Error in {module_name}: {e}")
@@ -407,6 +429,42 @@ def display_summary(final_findings, final_statistics):
             if dns_stats.get('anomalies_found', 0) == 0 and not dns_stats.get('error_message') and dns_stats.get('status') != 'skipped':
                  print(f"  {COLOR_GREEN}No direct DNS resolution discrepancies found for tested domains against public resolvers.{COLOR_RESET}")
         stats_printed = True
+
+    if 'mitm_detection' in stats_copy and 'local_promiscuous_mode' in stats_copy['mitm_detection']:
+        local_promisc_stats = stats_copy['mitm_detection']['local_promiscuous_mode']
+        print(f"\n{COLOR_YELLOW}{COLOR_BOLD}Local Promiscuous Mode Detection:{COLOR_RESET}")
+        if local_promisc_stats.get('status') != 'completed' and local_promisc_stats.get('error_message'): # Show error/warning if not completed okay
+            print(f"  {COLOR_YELLOW}Status: {local_promisc_stats.get('status')}. {local_promisc_stats.get('error_message', '')}{COLOR_RESET}")
+        
+        promisc_interfaces = local_promisc_stats.get('promiscuous_interfaces', [])
+        if promisc_interfaces:
+            print(f"  {COLOR_RED}Alert: Found local interface(s) in promiscuous mode: {', '.join(promisc_interfaces)}{COLOR_RESET}")
+        # Only print "No local interfaces..." if status was 'completed' and no error message related to status is already shown.
+        elif local_promisc_stats.get('status') == 'completed':
+            print(f"  {COLOR_GREEN}No local interfaces detected in promiscuous mode.{COLOR_RESET}")
+        
+        print(f"  Interfaces Checked: {local_promisc_stats.get('interfaces_checked', 0)}")
+        # If status was 'limited_support' (Windows) and no specific error, the generic error_message is the note.
+        if local_promisc_stats.get('status') == 'limited_support' and not promisc_interfaces :
+            print(f"  {COLOR_YELLOW}Note: {local_promisc_stats.get('error_message')}{COLOR_RESET}")
+
+        stats_printed = True
+
+    if 'mitm_detection' in stats_copy and 'remote_promiscuous_mode' in stats_copy['mitm_detection']:
+        remote_promisc_all_targets = stats_copy['mitm_detection']['remote_promiscuous_mode']
+        if remote_promisc_all_targets: # Check if not empty
+            print(f"\n{COLOR_YELLOW}{COLOR_BOLD}Remote Promiscuous Mode Detection (Experimental):{COLOR_RESET}")
+            for target_ip, data in remote_promisc_all_targets.items():
+                print(f"  {COLOR_CYAN}Target: {target_ip}{COLOR_RESET}")
+                if data.get('status') == 'skipped':
+                    print(f"    {COLOR_YELLOW}Status: Skipped ({data.get('error_message', 'Scapy not available')}){COLOR_RESET}")
+                elif data.get('status') == 'error':
+                    print(f"    {COLOR_RED}Error: {data.get('error_message', 'Unknown error')}{COLOR_RESET}")
+                elif data.get('response_to_bogus_mac_ping'):
+                    print(f"    {COLOR_RED}Alert: Potential promiscuous mode - responded to ICMP ping with bogus MAC.{COLOR_RESET}")
+                else:
+                    print(f"    {COLOR_GREEN}No promiscuous mode indicators from ICMP test (or target did not respond).{COLOR_RESET}")
+            stats_printed = True
     # Removed 'services' and 'environment' sections from summary as per refactoring goal
 
     if not stats_printed:
@@ -655,8 +713,8 @@ def main():
             run_ssh_analysis_wrapper,
             run_log_analysis_wrapper,
             run_local_traffic_analysis_wrapper,
-            run_arp_detection_wrapper, 
-            run_dns_spoofing_detection_wrapper, # Add new DNS spoofing detection wrapper
+            run_local_mitm_detection_wrapper, # Renamed from run_arp_detection_wrapper
+            run_dns_spoofing_detection_wrapper,
             # Non-network modules and their wrappers are removed
         ]
 

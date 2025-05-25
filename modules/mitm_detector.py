@@ -18,6 +18,17 @@ try:
 except ImportError:
     DNSPYTHON_AVAILABLE = False
 
+try:
+    from scapy.all import Ether, IP, ICMP, srp1, ARP, conf as scapy_conf, get_if_hwaddr, get_if_addr
+    SCAPY_AVAILABLE = True
+    scapy_conf.verb = 0 # Make Scapy less verbose by default
+except ImportError:
+    SCAPY_AVAILABLE = False
+except OSError as e: # Handle cases where Scapy might be installed but underlying tools (like Npcap on Windows) are missing
+    SCAPY_AVAILABLE = False
+    print(f"{COLOR_RED}Scapy Import Warning (OSError): {e}. Remote promiscuous mode detection will be skipped.{COLOR_RESET}")
+
+
 from modules.utils import (
     COLOR_GREEN, COLOR_RED, COLOR_YELLOW, COLOR_RESET,
     SEVERITY_INFO, SEVERITY_LOW, SEVERITY_MEDIUM, SEVERITY_HIGH, SEVERITY_CRITICAL,
@@ -330,6 +341,260 @@ def detect_dns_spoofing(managed_stats, managed_findings, add_finding_func):
     print(f"{COLOR_GREEN}[+] {summary_msg}{COLOR_RESET}")
 
 
+def detect_local_promiscuous_mode(managed_stats, managed_findings, add_finding_func):
+    """
+    Detects if any local network interfaces are operating in promiscuous mode.
+    """
+    print(f"{COLOR_GREEN}[*] Checking for local interfaces in promiscuous mode...{COLOR_RESET}")
+
+    local_promisc_stats = {
+        'promiscuous_interfaces': [],
+        'interfaces_checked': 0,
+        'status': 'completed',
+        'error_message': None
+    }
+    
+    if 'mitm_detection' not in managed_stats: # Ensure base key exists
+        managed_stats['mitm_detection'] = {} # Should be a manager.dict()
+
+    try:
+        interface_names = list(psutil.net_if_addrs().keys())
+        if not interface_names:
+            local_promisc_stats['status'] = 'error'
+            local_promisc_stats['error_message'] = "No network interfaces found by psutil."
+            add_finding_func(managed_findings, SEVERITY_LOW, "Promiscuous Mode Check Error", local_promisc_stats['error_message'])
+            managed_stats['mitm_detection']['local_promiscuous_mode'] = local_promisc_stats
+            return
+    except Exception as e:
+        local_promisc_stats['status'] = 'error'
+        local_promisc_stats['error_message'] = f"Error getting interface list: {e}"
+        add_finding_func(managed_findings, SEVERITY_MEDIUM, "Promiscuous Mode Check Error", local_promisc_stats['error_message'])
+        managed_stats['mitm_detection']['local_promiscuous_mode'] = local_promisc_stats
+        return
+
+    system = platform.system()
+
+    for if_name in interface_names:
+        local_promisc_stats['interfaces_checked'] += 1
+        is_promisc = False
+        command_output = None # For debugging or if needed
+
+        if system == "Linux":
+            command = ["ip", "link", "show", if_name]
+            success, output = run_command(command, timeout=5)
+            if success and output:
+                command_output = output
+                if "PROMISC" in output.upper(): # The PROMISC flag is usually uppercase
+                    is_promisc = True
+            elif not success:
+                print(f"{COLOR_YELLOW}Warning: Command '{' '.join(command)}' failed for interface {if_name}. Output: {output}{COLOR_RESET}")
+        
+        elif system == "Darwin": # macOS
+            command = ["ifconfig", if_name]
+            success, output = run_command(command, timeout=5)
+            if success and output:
+                command_output = output
+                # On macOS, 'promiscuous' is not a standard flag in ifconfig.
+                # Instead, we look for 'UP,BROADCAST,SMART,RUNNING,PROMISC,SIMPLEX,MULTICAST'
+                # The 'PROMISC' part of 'flags=<...PROMISC...>' indicates promiscuous mode.
+                # A more direct way is to check for the IFF_PROMISC flag value if using lower-level tools,
+                # but with ifconfig, we parse the flags line.
+                # Example: flags=8963<UP,BROADCAST,SMART,RUNNING,PROMISC,SIMPLEX,MULTICAST>
+                if "PROMISC" in output.upper(): # Check in flags line
+                    is_promisc = True
+            elif not success:
+                 print(f"{COLOR_YELLOW}Warning: Command '{' '.join(command)}' failed for interface {if_name}. Output: {output}{COLOR_RESET}")
+
+        elif system == "Windows":
+            # Reliable command-line detection of promiscuous mode on Windows is difficult.
+            # `netsh interface show interface` does not show this.
+            # `ipconfig` does not show this.
+            # This often requires checking driver behavior (e.g., Npcap/WinPcap) or using specific APIs,
+            # which is beyond simple command parsing.
+            local_promisc_stats['status'] = 'limited_support'
+            local_promisc_stats['error_message'] = "Promiscuous mode detection via command parsing is not reliably supported on Windows for individual interfaces."
+            # We will report this limitation once, not per interface.
+            # For the purpose of this function, we assume not detected for Windows.
+            is_promisc = False # Cannot confirm
+            # This message will be added as a general finding for Windows later if no promiscuous interfaces are found by other means (if any were added).
+            # We will add a general finding after the loop if system is Windows and no promisc interfaces were found.
+            pass # is_promisc remains False
+
+        else: # Other OS
+            local_promisc_stats['status'] = 'unsupported_os'
+            local_promisc_stats['error_message'] = f"Promiscuous mode detection is not implemented for OS: {system}."
+            # This message will be added as a general finding later.
+            is_promisc = False # Cannot confirm
+            pass # is_promisc remains False
+
+
+        if is_promisc:
+            local_promisc_stats['promiscuous_interfaces'].append(if_name)
+            add_finding_func(
+                managed_findings, SEVERITY_HIGH, 
+                f"Local Interface in Promiscuous Mode: {if_name}",
+                f"Interface {if_name} is operating in promiscuous mode.",
+                "This allows the interface to capture all network traffic it sees. Verify if this is intentional (e.g., for network analysis tools like Wireshark) or unauthorized."
+            )
+        
+        add_finding_func(
+            managed_findings, SEVERITY_INFO,
+            f"Interface {if_name} Status", # More generic title
+            f"Promiscuous mode check for {if_name}: {'Enabled' if is_promisc else 'Disabled/Not Detected'}. Details: {command_output if command_output else 'N/A for this OS/interface'}"
+        )
+
+    # Add general findings for Windows/Unsupported OS if status was set
+    if local_promisc_stats['status'] == 'limited_support' and not local_promisc_stats['promiscuous_interfaces']:
+         add_finding_func(managed_findings, SEVERITY_LOW, "Promiscuous Mode Check (Windows)", local_promisc_stats['error_message'], "Consider alternative methods or tools for promiscuous mode detection on Windows.")
+    elif local_promisc_stats['status'] == 'unsupported_os' and not local_promisc_stats['promiscuous_interfaces']:
+         add_finding_func(managed_findings, SEVERITY_LOW, "Promiscuous Mode Check (Unsupported OS)", local_promisc_stats['error_message'])
+
+
+    managed_stats['mitm_detection']['local_promiscuous_mode'] = local_promisc_stats
+    summary_msg = f"Local promiscuous mode check completed. Interfaces checked: {local_promisc_stats['interfaces_checked']}. Promiscuous interfaces found: {len(local_promisc_stats['promiscuous_interfaces'])}."
+    add_finding_func(managed_findings, SEVERITY_INFO, "Local Promiscuous Mode Check Summary", summary_msg)
+    print(f"{COLOR_GREEN}[+] {summary_msg}{COLOR_RESET}")
+
+
+def detect_remote_promiscuous_mode(managed_stats, managed_findings, add_finding_func, target_ip):
+    """
+    (Experimental) Detects potential remote promiscuous mode by sending an ICMP echo request
+    to the target IP but with a bogus destination MAC address.
+    Requires Scapy and root/administrator privileges for raw socket operations.
+    """
+    print(f"{COLOR_GREEN}[*] Attempting remote promiscuous mode detection for {target_ip} (Experimental)...{COLOR_RESET}")
+
+    # Initialize stats structure for this module
+    if 'mitm_detection' not in managed_stats:
+        managed_stats['mitm_detection'] = {} # Should be a manager.dict()
+    if 'remote_promiscuous_mode' not in managed_stats['mitm_detection']:
+        # This sub-dict will store results per target_ip
+        managed_stats['mitm_detection']['remote_promiscuous_mode'] = {} # Should be a manager.dict()
+
+    remote_promisc_stats = {
+        'target_ip': target_ip,
+        'status': 'completed',
+        'error_message': None,
+        'response_to_bogus_mac_ping': False,
+        'target_mac': None,
+        'source_mac': None,
+        'source_ip': None
+    }
+
+    if not SCAPY_AVAILABLE:
+        error_msg = "Scapy library not found or failed to load. Remote Promiscuous Mode detection skipped."
+        print(f"{COLOR_RED}Error: {error_msg}{COLOR_RESET}")
+        add_finding_func(managed_findings, SEVERITY_HIGH, "Remote Promiscuous Mode Error", error_msg,
+                         "Please install Scapy (e.g., pip install scapy) and its dependencies (like Npcap on Windows) to enable this check.")
+        remote_promisc_stats['status'] = 'skipped'
+        remote_promisc_stats['error_message'] = error_msg
+        managed_stats['mitm_detection']['remote_promiscuous_mode'][target_ip] = remote_promisc_stats
+        return
+
+    try:
+        # Determine interface for routing to target_ip (Scapy usually does this, but can be explicit)
+        # For simplicity, we'll use scapy_conf.iface, assuming it's set or Scapy can auto-determine.
+        # This can be a point of failure if the default interface isn't correct for the target.
+        # A more robust method would involve using Scapy's route object: `route = scapy_conf.route.route(target_ip)`
+        # then `iface = route[0]`, `source_ip = route[1]`.
+        
+        # For now, relying on scapy_conf.iface or Scapy's auto-selection.
+        # If scapy_conf.iface is None, Scapy tries to pick the best one.
+        # This requires root privileges for Scapy to list interfaces or send packets.
+        
+        # Get Source MAC and IP for Sending Interface
+        # Note: scapy_conf.iface might be a specific interface name string or an Iface object.
+        # get_if_hwaddr and get_if_addr usually expect an interface name.
+        # If scapy_conf.iface is an object, its 'name' attribute might be needed.
+        # For now, assume scapy_conf.iface is a string name or None.
+        # If None, Scapy will use default routing.
+        
+        # A more robust way to get the interface and source IP for a target:
+        try:
+            route_info = scapy_conf.route.route(target_ip) # (iface_name, src_ip_for_iface, gateway_ip)
+            iface_name = route_info[0]
+            source_ip = route_info[1]
+            source_mac = get_if_hwaddr(iface_name)
+        except Exception as e_route:
+            # Fallback if specific route determination fails, use default interface logic
+            print(f"{COLOR_YELLOW}Warning: Could not determine specific route/interface for {target_ip}: {e_route}. Relying on Scapy's default interface.{COLOR_RESET}")
+            iface_name = scapy_conf.iface # This could be None
+            source_mac = get_if_hwaddr(iface_name) if iface_name else get_if_hwaddr(scapy_conf.iface) # Re-fetch if iface_name was None
+            source_ip = get_if_addr(iface_name) if iface_name else get_if_addr(scapy_conf.iface)
+
+        remote_promisc_stats['source_mac'] = source_mac
+        remote_promisc_stats['source_ip'] = source_ip
+        
+        if not source_mac or not source_ip:
+            raise ValueError(f"Could not determine source MAC/IP for interface '{iface_name or 'auto-selected'}'. Ensure Scapy has network access and privileges.")
+
+        # Get Target MAC (via ARP with Scapy)
+        print(f"{COLOR_GREEN}[+] Attempting ARP resolution for {target_ip}...{COLOR_RESET}")
+        arp_request = Ether(src=source_mac, dst="ff:ff:ff:ff:ff:ff")/ARP(pdst=target_ip, psrc=source_ip, hwdst="00:00:00:00:00:00")
+        arp_reply = srp1(arp_request, timeout=2, iface=iface_name, verbose=0)
+
+        if arp_reply is None or not arp_reply.haslayer(ARP) or arp_reply[ARP].hwsrc is None:
+            error_msg = f"Could not resolve MAC address for target {target_ip} via ARP. Target may be down or not responding to ARP."
+            add_finding_func(managed_findings, SEVERITY_MEDIUM, "Remote Promiscuous Mode Prerequisite Failed", error_msg,
+                             f"Skipping remote promiscuous check for {target_ip}.")
+            remote_promisc_stats['status'] = 'error'
+            remote_promisc_stats['error_message'] = error_msg
+            managed_stats['mitm_detection']['remote_promiscuous_mode'][target_ip] = remote_promisc_stats
+            return
+        
+        target_mac = arp_reply[ARP].hwsrc
+        remote_promisc_stats['target_mac'] = target_mac
+        print(f"{COLOR_GREEN}[+] MAC for {target_ip} resolved to: {target_mac}{COLOR_RESET}")
+
+        bogus_mac = "00:11:22:33:44:55"
+        if target_mac.lower() == bogus_mac.lower(): # Should be rare
+            bogus_mac = "00:66:77:88:99:AA" # Use an alternative bogus MAC
+
+        # Craft and Send ICMP Ping with Bogus MAC
+        print(f"{COLOR_GREEN}[+] Sending ICMP echo to {target_ip} with bogus MAC {bogus_mac}...{COLOR_RESET}")
+        eth_frame = Ether(src=source_mac, dst=bogus_mac)
+        ip_packet = IP(src=source_ip, dst=target_ip)
+        icmp_packet = ICMP() # Echo-request
+        packet = eth_frame / ip_packet / icmp_packet
+        
+        # Send at layer 2, expect one reply.
+        # The interface needs to be specified for srp1 to send on the correct one.
+        reply = srp1(packet, timeout=3, iface=iface_name, verbose=0)
+
+        if reply:
+            remote_promisc_stats['response_to_bogus_mac_ping'] = True
+            # Check if the reply source MAC matches the actual target MAC
+            # This is to ensure the reply is indeed from the intended target IP, not some other device.
+            reply_src_mac = reply.src if reply.haslayer(Ether) else "Unknown MAC"
+            msg = (f"Potential Remote Promiscuous Mode on {target_ip} (MAC: {target_mac}): Responded to ICMP echo sent to a bogus MAC address ({bogus_mac}). "
+                   f"Reply received from MAC: {reply_src_mac}.")
+            rec = ("This is an indicator, not definitive proof. The target might be in promiscuous mode, "
+                   "part of a proxy ARP setup, or have unusual network configuration. Further investigation on the target is needed.")
+            add_finding_func(managed_findings, SEVERITY_MEDIUM, "Potential Remote Promiscuous Mode Detected", msg, rec)
+        else:
+            remote_promisc_stats['response_to_bogus_mac_ping'] = False
+            add_finding_func(managed_findings, SEVERITY_INFO, f"Remote Promiscuous Mode Test: {target_ip}",
+                             "No response to ICMP echo sent to bogus MAC. (This is expected for non-promiscuous hosts or if ICMP is firewalled).")
+
+    except PermissionError as e: # Often due to Scapy needing root for raw sockets
+        error_msg = f"Permission error with Scapy for remote promiscuous check on {target_ip}: {e}. Scapy usually requires root/administrator privileges."
+        print(f"{COLOR_RED}Error: {error_msg}{COLOR_RESET}")
+        add_finding_func(managed_findings, SEVERITY_HIGH, "Remote Promiscuous Mode Error", error_msg)
+        remote_promisc_stats['status'] = 'error'
+        remote_promisc_stats['error_message'] = error_msg
+    except Exception as e:
+        error_msg = f"Unexpected error during remote promiscuous mode detection for {target_ip}: {type(e).__name__} - {e}"
+        print(f"{COLOR_RED}Error: {error_msg}{COLOR_RESET}")
+        add_finding_func(managed_findings, SEVERITY_HIGH, "Remote Promiscuous Mode Error", error_msg)
+        remote_promisc_stats['status'] = 'error'
+        remote_promisc_stats['error_message'] = error_msg
+    
+    managed_stats['mitm_detection']['remote_promiscuous_mode'][target_ip] = remote_promisc_stats
+    summary_msg = f"Remote promiscuous mode check for {target_ip} completed. Responded to bogus MAC ping: {remote_promisc_stats['response_to_bogus_mac_ping']}."
+    add_finding_func(managed_findings, SEVERITY_INFO, f"Remote Promiscuous Mode Check Summary: {target_ip}", summary_msg)
+    print(f"{COLOR_GREEN}[+] {summary_msg}{COLOR_RESET}")
+
+
 if __name__ == '__main__':
     print("This module is intended to be run as part of the Guardian scanner.")
 
@@ -369,6 +634,32 @@ if __name__ == '__main__':
         detect_dns_spoofing(mock_stats_store, mock_findings_store, mock_add_finding)
     except Exception as e:
         print(f"Error during mock DNS Spoofing analysis: {e}")
+    
+    print("\n--- Running Mock Local Promiscuous Mode Detection ---")
+    try:
+        detect_local_promiscuous_mode(mock_stats_store, mock_findings_store, mock_add_finding)
+    except Exception as e:
+        print(f"Error during mock Promiscuous Mode analysis: {e}")
+    
+    # For remote promiscuous mode, a target IP is needed. Use default gateway if available.
+    # This is a very basic test and might not work in all environments without adjustment.
+    # It primarily checks if Scapy loads and basic packet crafting syntax.
+    # Actual test requires root and a responsive target on the local network segment.
+    print("\n--- Running Mock Remote Promiscuous Mode Detection ---")
+    target_for_remote_test = mock_stats_store.get('mitm_detection', {}).get('arp_cache_analysis', {}).get('default_gateway_ip')
+    if target_for_remote_test and SCAPY_AVAILABLE: # Only run if Scapy loaded and we have a target
+        print(f"  (Using target: {target_for_remote_test} for remote promiscuous test)")
+        # Ensure the sub-dictionary for remote_promiscuous_mode exists
+        if 'remote_promiscuous_mode' not in mock_stats_store['mitm_detection']:
+             mock_stats_store['mitm_detection']['remote_promiscuous_mode'] = MockManagerDict()
+        try:
+            detect_remote_promiscuous_mode(mock_stats_store, mock_findings_store, mock_add_finding, target_for_remote_test)
+        except Exception as e:
+            print(f"Error during mock Remote Promiscuous Mode analysis: {e}")
+    elif not SCAPY_AVAILABLE:
+        print("  Skipping remote promiscuous mode test: Scapy not available.")
+    else:
+        print("  Skipping remote promiscuous mode test: No target IP (default gateway) found from ARP analysis.")
 
 
     print("\n--- Mock Stats from MiTM Detection ---")
@@ -389,17 +680,34 @@ if __name__ == '__main__':
         print(f"    Anomalies Found: {dns_stats_display.get('anomalies_found')}")
         print(f"    System Servers: {dns_stats_display.get('system_servers')}")
         print(f"    Checks Performed: {len(dns_stats_display.get('checks', []))}")
-        # Optionally print details of first check if needed for debugging
-        # if dns_stats_display.get('checks'):
-        #    print(f"      Example Check (www.google.com): {dns_stats_display['checks'][0]}")
     else:
         print("  No DNS Spoofing stats found.")
+
+    if mitm_stats.get('local_promiscuous_mode'):
+        print("  Local Promiscuous Mode Stats:")
+        promisc_stats_display = mitm_stats['local_promiscuous_mode']
+        print(f"    Status: {promisc_stats_display.get('status')}")
+        if promisc_stats_display.get('error_message') and promisc_stats_display.get('status') != 'completed': 
+             print(f"    Note: {promisc_stats_display.get('error_message')}")
+        print(f"    Interfaces Checked: {promisc_stats_display.get('interfaces_checked')}")
+        print(f"    Promiscuous Interfaces Found: {promisc_stats_display.get('promiscuous_interfaces')}")
+    else:
+        print("  No Local Promiscuous Mode stats found.")
+
+    if mitm_stats.get('remote_promiscuous_mode'):
+        print("  Remote Promiscuous Mode Stats:")
+        for target, stats in mitm_stats['remote_promiscuous_mode'].items():
+            print(f"    Target: {target}")
+            for key, value in stats.items():
+                print(f"      {key}: {value}")
+    else:
+        print("  No Remote Promiscuous Mode stats found.")
 
 
     print("\n--- Mock Findings from MiTM Detection ---")
     for severity, findings_list in mock_findings_store.items():
-        if findings_list._list: # Check if list is not empty
+        if findings_list._list: 
             print(f"  {severity.upper()} Findings:")
-            for finding in findings_list._list: # Iterate through actual items
+            for finding in findings_list._list: 
                 print(f"    - {finding['title']}")
     print("\nNote: Standalone test depends on live system configuration and network conditions.")
