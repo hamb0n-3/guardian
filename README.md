@@ -7,9 +7,9 @@
 #############################################
 ```
 
-**Guardian is a network security scanner designed to provide in-depth security posture analysis of network configurations, listening services, active local network traffic, and remote targets. It also includes capabilities to detect potential ARP and DNS spoofing on the local network.**
+**Guardian is a network security scanner designed to provide in-depth security posture analysis of network configurations, listening services, active local network traffic, and remote targets. It also includes capabilities to detect potential ARP and DNS spoofing on the local network, and analyze SSL/TLS certificates of remote services.**
 
-It gathers network interface information, analyzes SSH configurations, examines authentication logs, summarizes active local connections, traces routes to external targets, profiles remote hosts by scanning common ports, analyzes the local ARP cache for anomalies, compares DNS resolutions to detect potential spoofing, and identifies potential vulnerabilities or misconfigurations related to network security.
+It gathers network interface information, analyzes SSH configurations, examines authentication logs, summarizes active local connections, traces routes to external targets, profiles remote hosts by scanning common ports (including SSL/TLS certificate analysis for HTTPS services), analyzes the local ARP cache for anomalies, compares DNS resolutions to detect potential spoofing, and identifies potential vulnerabilities or misconfigurations related to network security.
 
 ## Features
 
@@ -33,6 +33,7 @@ Guardian performs a range of network-focused checks, organized into modules:
 *   **Target Host Profiling (`target_profiler.py`)**:
     *   Performs a basic TCP port scan on a specified remote target host for common service ports (e.g., 21, 22, 23, 25, 53, 80, 443, 3306, 3389, 8080).
     *   Attempts to grab service banners from open ports to identify running services.
+    *   **SSL/TLS Certificate Analysis**: When port 443 is found open on a target specified with `--target-host`, this feature retrieves and analyzes its SSL/TLS certificate. Checks include hostname verification (CN/SAN vs target domain), validity period, self-signed certificate heuristics, basic issuer details, and the presence of the HSTS header.
 *   **MiTM Detection (`mitm_detector.py`)**:
     *   **ARP Cache Analysis**: Detects potential ARP spoofing by checking for multiple MAC addresses associated with the default gateway IP in the local ARP cache.
     *   **DNS Spoofing Detection**: Compares DNS resolutions for a set of common domains between the system's configured DNS resolver and known public DNS servers. Discrepancies are flagged as potential DNS spoofing. Requires the `dnspython` library to be installed.
@@ -82,7 +83,7 @@ To utilize the traceroute and target profiling features, specify a target host:
 ```bash
 sudo python3 guardian.py --target-host <hostname_or_IP>
 ```
-The `--target-host` argument is required for the traceroute and remote target profiling modules to run. Other local scan modules, including ARP and DNS spoofing detection, will run regardless of this argument. ARP and DNS detection benefit from root/administrator privileges for reliable system information access.
+The `--target-host` argument is required for the traceroute and remote target profiling modules (including SSL/TLS analysis) to run. Other local scan modules, including ARP and DNS spoofing detection, will run regardless of this argument. ARP and DNS detection benefit from root/administrator privileges for reliable system information access.
 The DNS Spoofing Detection module runs by default but will skip its checks and issue a warning if the `dnspython` library is not installed.
 
 **Output:**
@@ -92,7 +93,7 @@ The DNS Spoofing Detection module runs by default but will skip its checks and i
 3.  **Warnings/Errors**: Any errors encountered during the scan (e.g., permission denied, file not found) will be printed, often in red or yellow.
 4.  **Scan Summary**:
     *   **Findings by Severity**: A count of findings categorized as CRITICAL, HIGH, MEDIUM, LOW, INFO.
-    *   **Key Statistics Gathered**: A summary of key metrics collected by the modules (OS info, resource usage, network counts, environment type, etc.).
+    *   **Key Statistics Gathered**: A summary of key metrics collected by the modules. This includes OS info, resource usage, network counts, environment type, and specific results for profiled targets like open ports, banners, and SSL/TLS certificate details (subject, issuer, validity, HSTS presence, warnings like hostname mismatch or expiration).
 5.  **Detailed Findings**: A list of all findings, sorted by severity (Critical first), including:
     *   Severity Level
     *   Title
@@ -135,7 +136,7 @@ The core logic is broken down into modules within the `modules/` directory:
 *   `local_traffic_analyzer.py`: Analysis of active local network connections.
 *   `ssh_analysis.py`: SSH daemon configuration checks.
 *   `log_analysis.py`: Authentication log checks.
-*   `target_profiler.py`: Remote target port scanning and banner grabbing.
+*   `target_profiler.py`: Remote target port scanning, banner grabbing, and SSL/TLS certificate analysis.
 *   `mitm_detector.py`: ARP cache analysis and DNS spoofing detection.
 
 ## OPSEC Considerations

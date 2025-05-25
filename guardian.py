@@ -311,6 +311,48 @@ def display_summary(final_findings, final_statistics):
                             print(f"      Port {port}: {banner_preview}...")
                 elif not (profile.get('status') == 'error'): # If no open ports and not an error state already printed
                     print(f"    No common ports found open or target unresponsive.")
+
+                # Display SSL/TLS Analysis Results
+                ssl_analysis_results = profile.get('ssl_tls_analysis')
+                if ssl_analysis_results:
+                    print(f"    {COLOR_BLUE}SSL/TLS Analysis (Port {ssl_analysis_results.get('port', 'N/A')}):{COLOR_RESET}")
+                    if ssl_analysis_results.get('status') == 'error':
+                        print(f"      {COLOR_RED}Error: {ssl_analysis_results.get('error_message', 'Unknown SSL/TLS analysis error')}{COLOR_RESET}")
+                    else:
+                        # Hostname Verification
+                        hostname_match = ssl_analysis_results.get('hostname_match')
+                        if hostname_match is True:
+                            print(f"      Hostname Verification: {COLOR_GREEN}Matched{COLOR_RESET}")
+                        elif hostname_match is False:
+                            print(f"      Hostname Verification: {COLOR_RED}MISMATCH!{COLOR_RESET}")
+                        else:
+                            print(f"      Hostname Verification: {COLOR_YELLOW}Unknown/Not Performed{COLOR_RESET}")
+
+                        # Certificate Details
+                        cert_details = ssl_analysis_results.get('certificate_details', {})
+                        subject_cn = cert_details.get('subject_cn', 'N/A')
+                        issuer_cn = cert_details.get('issuer_cn', 'N/A')
+                        not_before = cert_details.get('notBefore', 'N/A')
+                        not_after = cert_details.get('notAfter', 'N/A')
+                        print(f"      Subject CN: {subject_cn}")
+                        print(f"      Issuer CN: {issuer_cn}")
+                        print(f"      Validity: From {not_before} to {not_after}")
+
+                        # HSTS Header
+                        hsts_header = ssl_analysis_results.get('hsts_header')
+                        if hsts_header and not hsts_header.startswith("Error checking"):
+                            print(f"      HSTS Header: Present ({hsts_header})")
+                        elif hsts_header and hsts_header.startswith("Error checking"):
+                             print(f"      HSTS Header: {COLOR_YELLOW}{hsts_header}{COLOR_RESET}")
+                        else:
+                            print(f"      HSTS Header: {COLOR_YELLOW}Not Found{COLOR_RESET}")
+                        
+                        # Specific Warnings from the module
+                        ssl_warnings = ssl_analysis_results.get('warnings', [])
+                        if ssl_warnings:
+                            print(f"      {COLOR_YELLOW}Warnings:{COLOR_RESET}")
+                            for warning in ssl_warnings:
+                                print(f"        - {warning}")
             stats_printed = True
 
     if 'mitm_detection' in stats_copy and 'arp_cache_analysis' in stats_copy['mitm_detection']:
