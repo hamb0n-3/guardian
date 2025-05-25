@@ -33,6 +33,7 @@ from modules import ssh_analysis
 from modules import log_analysis
 from modules import local_traffic_analyzer
 from modules import target_profiler
+from modules import mitm_detector
 
 # --- Process-Safe Finding Adder ---
 def add_finding_mp(managed_findings, severity, title, description, recommendation="N/A"):
@@ -141,6 +142,19 @@ def run_target_profiling_wrapper(managed_stats, managed_findings, target_host):
         logger.info(f"Starting module: {module_name}")
         # managed_stats['target_profiles'] should be initialized in main()
         target_profiler.profile_target(managed_stats, managed_findings, add_finding_mp, target_host)
+        logger.info(f"Finished module: {module_name}")
+    except Exception as e:
+        logger.error(f"Process Error in {module_name}: {e}")
+        add_finding_mp(managed_findings, SEVERITY_HIGH, f"Module Error: {module_name}", f"Failed to run: {e}")
+
+def run_arp_detection_wrapper(managed_stats, managed_findings):
+    """Wrapper to run the ARP cache anomaly detection module."""
+    logger = logging.getLogger(f"guardian.{run_arp_detection_wrapper.__name__}")
+    module_name = "arp_cache_analysis"
+    try:
+        logger.info(f"Starting module: {module_name}")
+        # managed_stats['mitm_detection'] should be initialized in main()
+        mitm_detector.detect_arp_cache_anomalies(managed_stats, managed_findings, add_finding_mp)
         logger.info(f"Finished module: {module_name}")
     except Exception as e:
         logger.error(f"Process Error in {module_name}: {e}")
@@ -285,6 +299,32 @@ def display_summary(final_findings, final_statistics):
                 elif not (profile.get('status') == 'error'): # If no open ports and not an error state already printed
                     print(f"    No common ports found open or target unresponsive.")
             stats_printed = True
+
+    if 'mitm_detection' in stats_copy and 'arp_cache_analysis' in stats_copy['mitm_detection']:
+        arp_stats = stats_copy['mitm_detection']['arp_cache_analysis']
+        # Ensure arp_stats is not None and default_gateway_ip key exists, providing 'N/A' if not.
+        gateway_ip_display = arp_stats.get('default_gateway_ip', 'N/A') if arp_stats else 'N/A'
+        print(f"\n{COLOR_YELLOW}{COLOR_BOLD}ARP Cache Analysis (Gateway: {gateway_ip_display}):{COLOR_RESET}")
+        
+        if arp_stats: # Proceed only if arp_stats itself is not None
+            gateway_macs = arp_stats.get('gateway_mac_entries', [])
+            # Check for a specific error message related to gateway detection or ARP processing first
+            if arp_stats.get('status') == 'error' and arp_stats.get('error_message'):
+                 print(f"  {COLOR_RED}Error: {arp_stats.get('error_message')}{COLOR_RESET}")
+            elif arp_stats.get('status') == 'warning' and arp_stats.get('error_message'): # For "Gateway ARP Entry Missing"
+                 print(f"  {COLOR_YELLOW}Warning: {arp_stats.get('error_message')}{COLOR_RESET}")
+            elif arp_stats.get('anomalies_found', 0) > 0:
+                # The finding already provides details, this is a summary
+                print(f"  {COLOR_RED}Alert: Potential ARP spoofing! Gateway ({gateway_ip_display}) associated with multiple MACs: {', '.join(sorted(list(set(gateway_macs))))}{COLOR_RESET}")
+            elif gateway_macs: # Normal case, one or more identical MACs for the gateway
+                print(f"  Gateway MAC(s): {', '.join(sorted(list(set(gateway_macs))))}")
+            elif not gateway_macs and arp_stats.get('default_gateway_ip'): # Gateway IP known, but no MACs found and no specific error/warning message shown above.
+                 print(f"  No ARP entry currently found for the gateway ({gateway_ip_display}). This might be temporary.")
+            # If arp_stats.get('default_gateway_ip') was None, it's handled by gateway_ip_display = 'N/A'
+            # and the error message about not finding gateway would be more relevant.
+        else: # arp_stats is None or empty dictionary
+            print(f"  {COLOR_YELLOW}ARP analysis data is missing or incomplete.{COLOR_RESET}")
+        stats_printed = True
     # Removed 'services' and 'environment' sections from summary as per refactoring goal
 
     if not stats_printed:
@@ -533,64 +573,27 @@ def main():
             run_ssh_analysis_wrapper,
             run_log_analysis_wrapper,
             run_local_traffic_analysis_wrapper,
+            run_arp_detection_wrapper, # Add new ARP detection wrapper
             # Non-network modules and their wrappers are removed
         ]
-
-        processes = []
-        
-        # Add traceroute process if target_host is provided
-        if args.target_host:
-            # Prepare managed_stats for traceroute results
-            if 'network' not in managed_stats:
-                managed_stats['network'] = manager.dict() # Ensure 'network' key exists and is a managed dict
-            managed_stats['network']['traceroute_results'] = manager.dict() # Add 'traceroute_results' as a managed dict
-
-            # Note: run_traceroute_wrapper does not exist yet in the provided code, assuming it will be added.
-            # It will need `args.target_host`
-            p_trace = multiprocessing.Process(target=run_traceroute_wrapper, args=(managed_stats, managed_findings, args.target_host))
-            processes.append(p_trace)
-            # p_trace.start() will be called in the loop below, or start it here if it's a one-off
-            # For consistency with other modules, it will be started in the loop.
-
-        # Log the start of module launching phase.
-        logger.info("--- Launching Modules Concurrently ---")
-        for module_process in processes: # Iterate through the processes list which may include traceroute
-            # If the process was already configured with args (like traceroute)
-            # ensure Process() call was appropriate or adjust here.
-            # The current structure assumes all processes in `modules_to_run` list take (managed_stats, managed_findings)
-            # The traceroute process `p_trace` is already configured with its specific args.
-            # So, if module_process is p_trace, it's already set.
-            # If it's from modules_to_run, then:
-            if not module_process.is_alive() and module_process not in [p for p in processes if p.name == run_traceroute_wrapper.__name__]: # Check if it's not already started
-                 # This logic is becoming complex. Simpler: start p_trace separately if needed,
-                 # or ensure all module_wrapper_func in modules_to_run have a consistent signature.
-                 # Let's refine the process creation loop:
-                 pass # Placeholder for refined logic if needed. The current setup should work.
-
-        # Start all processes
-        for p in processes:
-            if not p.is_alive(): # Start only if not already started (e.g. if we started p_trace earlier)
-                 p.start()
-            # Print statement moved to inside the wrapper for better timing (now logger call inside wrapper)
-        
-        # If traceroute was added, it's already in 'processes' and will be started above.
-        # The `modules_to_run` list is for standard modules.
-        # We need to ensure the main loop for starting processes correctly handles the potentially pre-configured p_trace.
 
         # Simpler approach for starting processes:
         # Create standard module processes
         standard_processes = []
+        
+        # Initialize managed_stats sub-dictionaries for modules that require it
+        managed_stats['mitm_detection'] = manager.dict() # For ARP detection module
+        
         for module_wrapper_func in modules_to_run:
             p = multiprocessing.Process(target=module_wrapper_func, args=(managed_stats, managed_findings))
             standard_processes.append(p)
         
-        # Add traceroute process if specified
+        # Add conditional processes like traceroute and target profiler
         if args.target_host:
-            if 'network' not in managed_stats:
+            if 'network' not in managed_stats: # Should already exist if network_scan runs, but good check
                 managed_stats['network'] = manager.dict()
             managed_stats['network']['traceroute_results'] = manager.dict() # For traceroute
             
-            # Prepare managed_stats for target profiling results
             if 'target_profiles' not in managed_stats:
                 managed_stats['target_profiles'] = manager.dict() # For target profiler
 
@@ -599,7 +602,6 @@ def main():
             
             p_profile = multiprocessing.Process(target=run_target_profiling_wrapper, args=(managed_stats, managed_findings, args.target_host))
             standard_processes.append(p_profile)
-
 
         # Start all processes
         logger.info("--- Launching All Modules Concurrently ---")

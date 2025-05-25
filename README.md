@@ -7,9 +7,9 @@
 #############################################
 ```
 
-**Guardian is a network security scanner designed to provide in-depth security posture analysis of network configurations, listening services, active local network traffic, and remote targets.**
+**Guardian is a network security scanner designed to provide in-depth security posture analysis of network configurations, listening services, active local network traffic, and remote targets. It also includes capabilities to detect potential ARP spoofing on the local network.**
 
-It gathers network interface information, analyzes SSH configurations, examines authentication logs, summarizes active local connections, traces routes to external targets, profiles remote hosts by scanning common ports, and identifies potential vulnerabilities or misconfigurations related to network security.
+It gathers network interface information, analyzes SSH configurations, examines authentication logs, summarizes active local connections, traces routes to external targets, profiles remote hosts by scanning common ports, analyzes the local ARP cache for anomalies, and identifies potential vulnerabilities or misconfigurations related to network security.
 
 ## Features
 
@@ -33,6 +33,8 @@ Guardian performs a range of network-focused checks, organized into modules:
 *   **Target Host Profiling (`target_profiler.py`)**:
     *   Performs a basic TCP port scan on a specified remote target host for common service ports (e.g., 21, 22, 23, 25, 53, 80, 443, 3306, 3389, 8080).
     *   Attempts to grab service banners from open ports to identify running services.
+*   **MiTM Detection (`mitm_detector.py`)**:
+    *   **ARP Cache Analysis**: Detects potential ARP spoofing by checking for multiple MAC addresses associated with the default gateway IP in the local ARP cache.
 *   **Concurrency**: Utilizes Python's `multiprocessing` to run checks concurrently for improved performance.
 
 ## Requirements
@@ -70,7 +72,7 @@ To utilize the traceroute and target profiling features, specify a target host:
 ```bash
 sudo python3 guardian.py --target-host <hostname_or_IP>
 ```
-The `--target-host` argument is required for the traceroute and remote target profiling modules to run. Other local scan modules will run regardless of this argument.
+The `--target-host` argument is required for the traceroute and remote target profiling modules to run. Other local scan modules, including ARP spoofing detection, will run regardless of this argument. ARP detection benefits from root/administrator privileges for reliable ARP table access.
 
 **Output:**
 
@@ -123,6 +125,7 @@ The core logic is broken down into modules within the `modules/` directory:
 *   `ssh_analysis.py`: SSH daemon configuration checks.
 *   `log_analysis.py`: Authentication log checks.
 *   `target_profiler.py`: Remote target port scanning and banner grabbing.
+*   `mitm_detector.py`: ARP cache analysis for detecting potential ARP spoofing.
 
 ## OPSEC Considerations
 
