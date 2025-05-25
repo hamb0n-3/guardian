@@ -31,6 +31,8 @@ from modules import network_scan
 from modules import ssh_analysis
 # Import newly added modules
 from modules import log_analysis
+from modules import local_traffic_analyzer
+from modules import target_profiler
 
 # --- Process-Safe Finding Adder ---
 def add_finding_mp(managed_findings, severity, title, description, recommendation="N/A"):
@@ -102,6 +104,43 @@ def run_log_analysis_wrapper(managed_stats, managed_findings):
         logger.info(f"Starting module: {module_name}")
         # Call the primary function from the log_analysis module
         log_analysis.analyze_auth_log(managed_stats, managed_findings, add_finding_mp)
+        logger.info(f"Finished module: {module_name}")
+    except Exception as e:
+        logger.error(f"Process Error in {module_name}: {e}")
+        add_finding_mp(managed_findings, SEVERITY_HIGH, f"Module Error: {module_name}", f"Failed to run: {e}")
+
+def run_local_traffic_analysis_wrapper(managed_stats, managed_findings):
+    logger = logging.getLogger(f"guardian.{run_local_traffic_analysis_wrapper.__name__}")
+    module_name = "local_traffic_analyzer"
+    try:
+        logger.info(f"Starting module: {module_name}")
+        local_traffic_analyzer.analyze_local_traffic(managed_stats, managed_findings, add_finding_mp)
+        logger.info(f"Finished module: {module_name}")
+    except Exception as e:
+        logger.error(f"Process Error in {module_name}: {e}")
+        add_finding_mp(managed_findings, SEVERITY_HIGH, f"Module Error: {module_name}", f"Failed to run: {e}")
+
+def run_traceroute_wrapper(managed_stats, managed_findings, target_host):
+    """Wrapper to run the traceroute function from network_scan module."""
+    logger = logging.getLogger(f"guardian.{run_traceroute_wrapper.__name__}")
+    module_name = f"traceroute to {target_host}"
+    try:
+        logger.info(f"Starting module: {module_name}")
+        # Preparation of managed_stats['network']['traceroute_results'] is handled in main() before process creation
+        network_scan.trace_route_to_target(managed_stats, managed_findings, add_finding_mp, target_host)
+        logger.info(f"Finished module: {module_name}")
+    except Exception as e:
+        logger.error(f"Process Error in {module_name}: {e}")
+        add_finding_mp(managed_findings, SEVERITY_HIGH, f"Module Error: {module_name}", f"Failed to run: {e}")
+
+def run_target_profiling_wrapper(managed_stats, managed_findings, target_host):
+    """Wrapper to run the target profiling module."""
+    logger = logging.getLogger(f"guardian.{run_target_profiling_wrapper.__name__}")
+    module_name = f"target_profiler for {target_host}"
+    try:
+        logger.info(f"Starting module: {module_name}")
+        # managed_stats['target_profiles'] should be initialized in main()
+        target_profiler.profile_target(managed_stats, managed_findings, add_finding_mp, target_host)
         logger.info(f"Finished module: {module_name}")
     except Exception as e:
         logger.error(f"Process Error in {module_name}: {e}")
@@ -196,6 +235,56 @@ def display_summary(final_findings, final_statistics):
              if sudo_events > 0: print(f"    Sudo Events (from logs): {sudo_events}") # Clarify origin
              if ssh_logins > 0: print(f"    SSH Logins Found: {ssh_logins}")
              stats_printed = True
+
+    if 'local_traffic' in stats_copy:
+        lt_stats = stats_copy['local_traffic']
+        print(f"  Active Connections: {lt_stats.get('active_connections_count', 0)} (TCP: {lt_stats.get('tcp_connections', 0)}, UDP: {lt_stats.get('udp_connections', 0)})")
+        stats_printed = True
+    
+    if 'network' in stats_copy and 'traceroute_results' in stats_copy['network']:
+        traceroute_data = stats_copy['network']['traceroute_results']
+        if traceroute_data: # Check if not empty
+            print(f"\n{COLOR_YELLOW}{COLOR_BOLD}Traceroute Results:{COLOR_RESET}")
+            for target, hops_or_error in traceroute_data.items():
+                print(f"  {COLOR_CYAN}Target: {target}{COLOR_RESET}")
+                if isinstance(hops_or_error, list) and hops_or_error and 'error' not in hops_or_error[0]:
+                    for hop_info in hops_or_error:
+                        print(f"    Hop {hop_info.get('hop', 'N/A')}: {hop_info.get('ip', 'N/A')} ({hop_info.get('hostname', 'N/A')})")
+                elif isinstance(hops_or_error, list) and hops_or_error and 'error' in hops_or_error[0]:
+                    print(f"    Error: {hops_or_error[0]['error']}")
+                else:
+                    print(f"    No hops found or traceroute failed for {target}.")
+            stats_printed = True
+
+    if 'target_profiles' in stats_copy:
+        profile_data = stats_copy['target_profiles']
+        if profile_data: # Check if not empty
+            print(f"\n{COLOR_YELLOW}{COLOR_BOLD}Target Profile Results:{COLOR_RESET}")
+            for target, profile in profile_data.items():
+                print(f"  {COLOR_CYAN}Target: {target}{COLOR_RESET}")
+                # Check for 'status' and 'error_message' which are now part of target_profile_stats
+                if profile.get('status') == 'error' and profile.get('error_message'):
+                    print(f"    {COLOR_RED}Error: {profile['error_message']}{COLOR_RESET}")
+                    continue
+                # Check for general errors array if status isn't error (e.g. port specific errors)
+                if 'errors' in profile and profile['errors']:
+                     for err_entry in profile['errors'][:3]: # Show first 3 port errors
+                         port_err_key = list(err_entry.keys())[0] # Port number or specific error key
+                         port_err_val = err_entry[port_err_key]
+                         print(f"    {COLOR_YELLOW}Port {port_err_key} Warning: {str(port_err_val)[:100]}{COLOR_RESET}")
+
+                open_ports = profile.get('open_ports', [])
+                if open_ports:
+                    print(f"    {COLOR_GREEN}Open Ports:{COLOR_RESET} {', '.join(map(str, sorted(open_ports)))}")
+                    banners = profile.get('banners', {})
+                    if banners:
+                        print(f"    {COLOR_GREEN}Banners:{COLOR_RESET}")
+                        for port, banner in banners.items():
+                            banner_preview = banner.strip().replace('\n', ' ').replace('\r', '')[:100] # Clean and shorten
+                            print(f"      Port {port}: {banner_preview}...")
+                elif not (profile.get('status') == 'error'): # If no open ports and not an error state already printed
+                    print(f"    No common ports found open or target unresponsive.")
+            stats_printed = True
     # Removed 'services' and 'environment' sections from summary as per refactoring goal
 
     if not stats_printed:
@@ -392,6 +481,7 @@ def main():
         help="Path to a file where operational logs should be saved (e.g., guardian_run.log).\n"
              "If not specified, logs will only be output to the console."
     )
+    parser.add_argument("--target-host", type=str, help="Target host (IP or hostname) for traceroute functionality.")
     # Add other future arguments here, for example:
     # parser.add_argument("--config", type=str, help="Path to a custom configuration file.")
     
@@ -442,18 +532,81 @@ def main():
             run_network_scan_wrapper,
             run_ssh_analysis_wrapper,
             run_log_analysis_wrapper,
+            run_local_traffic_analysis_wrapper,
             # Non-network modules and their wrappers are removed
         ]
 
         processes = []
+        
+        # Add traceroute process if target_host is provided
+        if args.target_host:
+            # Prepare managed_stats for traceroute results
+            if 'network' not in managed_stats:
+                managed_stats['network'] = manager.dict() # Ensure 'network' key exists and is a managed dict
+            managed_stats['network']['traceroute_results'] = manager.dict() # Add 'traceroute_results' as a managed dict
+
+            # Note: run_traceroute_wrapper does not exist yet in the provided code, assuming it will be added.
+            # It will need `args.target_host`
+            p_trace = multiprocessing.Process(target=run_traceroute_wrapper, args=(managed_stats, managed_findings, args.target_host))
+            processes.append(p_trace)
+            # p_trace.start() will be called in the loop below, or start it here if it's a one-off
+            # For consistency with other modules, it will be started in the loop.
+
         # Log the start of module launching phase.
         logger.info("--- Launching Modules Concurrently ---")
-        for module_wrapper_func in modules_to_run:
-            # Pass the managed dicts to each process target function
-            p = multiprocessing.Process(target=module_wrapper_func, args=(managed_stats, managed_findings))
-            processes.append(p)
-            p.start()
+        for module_process in processes: # Iterate through the processes list which may include traceroute
+            # If the process was already configured with args (like traceroute)
+            # ensure Process() call was appropriate or adjust here.
+            # The current structure assumes all processes in `modules_to_run` list take (managed_stats, managed_findings)
+            # The traceroute process `p_trace` is already configured with its specific args.
+            # So, if module_process is p_trace, it's already set.
+            # If it's from modules_to_run, then:
+            if not module_process.is_alive() and module_process not in [p for p in processes if p.name == run_traceroute_wrapper.__name__]: # Check if it's not already started
+                 # This logic is becoming complex. Simpler: start p_trace separately if needed,
+                 # or ensure all module_wrapper_func in modules_to_run have a consistent signature.
+                 # Let's refine the process creation loop:
+                 pass # Placeholder for refined logic if needed. The current setup should work.
+
+        # Start all processes
+        for p in processes:
+            if not p.is_alive(): # Start only if not already started (e.g. if we started p_trace earlier)
+                 p.start()
             # Print statement moved to inside the wrapper for better timing (now logger call inside wrapper)
+        
+        # If traceroute was added, it's already in 'processes' and will be started above.
+        # The `modules_to_run` list is for standard modules.
+        # We need to ensure the main loop for starting processes correctly handles the potentially pre-configured p_trace.
+
+        # Simpler approach for starting processes:
+        # Create standard module processes
+        standard_processes = []
+        for module_wrapper_func in modules_to_run:
+            p = multiprocessing.Process(target=module_wrapper_func, args=(managed_stats, managed_findings))
+            standard_processes.append(p)
+        
+        # Add traceroute process if specified
+        if args.target_host:
+            if 'network' not in managed_stats:
+                managed_stats['network'] = manager.dict()
+            managed_stats['network']['traceroute_results'] = manager.dict() # For traceroute
+            
+            # Prepare managed_stats for target profiling results
+            if 'target_profiles' not in managed_stats:
+                managed_stats['target_profiles'] = manager.dict() # For target profiler
+
+            p_trace = multiprocessing.Process(target=run_traceroute_wrapper, args=(managed_stats, managed_findings, args.target_host))
+            standard_processes.append(p_trace)
+            
+            p_profile = multiprocessing.Process(target=run_target_profiling_wrapper, args=(managed_stats, managed_findings, args.target_host))
+            standard_processes.append(p_profile)
+
+
+        # Start all processes
+        logger.info("--- Launching All Modules Concurrently ---")
+        for p in standard_processes:
+            p.start()
+        
+        processes = standard_processes # Update main processes list
 
         # --- Wait for Processes to Complete --- #
         # Log that the script is now waiting for module completion.

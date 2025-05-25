@@ -7,9 +7,12 @@ Guardian Module: Network Scanning (Interfaces, Listening Ports)
 
 import socket
 import psutil
+import platform
+import re
 from modules.utils import (
     COLOR_GREEN, COLOR_RED, COLOR_YELLOW, COLOR_RESET,
-    SEVERITY_INFO, SEVERITY_LOW, SEVERITY_MEDIUM, SEVERITY_HIGH
+    SEVERITY_INFO, SEVERITY_LOW, SEVERITY_MEDIUM, SEVERITY_HIGH,
+    run_command # Assuming run_command is available in utils
 )
 
 def get_network_interfaces(managed_stats, managed_findings, add_finding_func):
@@ -141,3 +144,111 @@ def get_listening_ports(managed_stats, managed_findings, add_finding_func):
     current_network_stats['listening_ports'] = listening_ports_local # Store collected list
     current_network_stats['listening_ports_count'] = listening_count
     managed_stats['network'] = current_network_stats # Reassign to sync 
+
+def trace_route_to_target(managed_stats, managed_findings, add_finding_func, target_host):
+    """Performs a traceroute to the target host."""
+    print(f"{COLOR_GREEN}[*] Starting traceroute to {target_host}...{COLOR_RESET}")
+
+    # Ensure 'network' and 'traceroute_results' keys exist in managed_stats.
+    # This is ideally prepared by the caller (wrapper in guardian.py)
+    # For robustness, check and initialize if absolutely necessary, though this might not be multiprocess-safe if not managed dicts
+    if 'network' not in managed_stats:
+        managed_stats['network'] = {} # This should be a manager.dict() if created here
+    if 'traceroute_results' not in managed_stats['network']:
+        managed_stats['network']['traceroute_results'] = {} # This should be a manager.dict() if created here
+        
+    traceroute_results_for_target = [] # Local list to store hops
+
+    system = platform.system()
+    if system == "Windows":
+        command = ["tracert", "-d", target_host]
+        # Regex for Windows: extracts hop number and IP. Example: "  1    <1 ms    <1 ms    <1 ms  192.168.1.1"
+        # It should capture "  1" and "192.168.1.1"
+        # More robust regex: Skip lines with '*' for timeouts or lines with "Trace complete."
+        hop_regex = re.compile(r"^\s*(\d+)\s+.*?\s+([\d\.]+)\s*$")
+    else: # Linux/macOS
+        command = ["traceroute", "-n", target_host]
+        # Regex for Linux: extracts hop number and IP. Example: " 1  192.168.1.1  0.300 ms  0.250 ms  0.200 ms"
+        # It should capture " 1" and "192.168.1.1"
+        hop_regex = re.compile(r"^\s*(\d+)\s+([\d\.]+)\s+.*")
+
+    # Use a timeout for run_command, e.g., 60 seconds
+    # The run_command utility is expected to return a tuple (success_boolean, output_string)
+    success, output = run_command(command, timeout=60) 
+
+    if not success or not output:
+        error_msg = f"Traceroute command failed or returned no output for {target_host}."
+        if output: # If there's some output (e.g. error message from command itself)
+            error_msg += f" Output: {output.strip()}"
+        print(f"{COLOR_RED}Error: {error_msg}{COLOR_RESET}")
+        add_finding_func(managed_findings, SEVERITY_HIGH, "Traceroute Execution Failed", error_msg, f"Verify '{command[0]}' is installed and {target_host} is reachable.")
+        managed_stats['network']['traceroute_results'][target_host] = [{'error': error_msg}]
+        return
+
+    hops_list = []
+    output_lines = output.splitlines()
+
+    for line in output_lines:
+        line = line.strip()
+        match = hop_regex.match(line)
+        if match:
+            hop_num_str, ip_address = match.groups()
+            hop_num = int(hop_num_str)
+            
+            hostname = ip_address # Default to IP if resolution fails
+            try:
+                # Attempt reverse DNS lookup with a timeout (socket.gethostbyaddr doesn't have direct timeout)
+                # This can be slow. Consider making it optional or handling timeouts carefully.
+                # For now, basic attempt:
+                hostname, _, _ = socket.gethostbyaddr(ip_address)
+            except socket.herror:
+                pass # Keep hostname as IP address
+            except Exception as e: # Catch other potential errors during resolution
+                print(f"{COLOR_YELLOW}Warning: Reverse DNS lookup for {ip_address} failed: {e}{COLOR_RESET}")
+                pass
+
+
+            hop_info = {'hop': hop_num, 'ip': ip_address, 'hostname': hostname}
+            hops_list.append(hop_info)
+            
+            add_finding_func(
+                managed_findings,
+                SEVERITY_INFO,
+                f"Traceroute to {target_host} - Hop {hop_num}",
+                f"IP: {ip_address} (Hostname: {hostname})",
+                "Review route for unexpected or suspicious hops."
+            )
+        elif "*" in line and "Request timed out" not in line and "Trace complete" not in line: # Common timeout indicator
+             # Try to get hop number if available (some traceroutes print " 1  * * *")
+            timeout_match = re.match(r"^\s*(\d+)\s+\*\s+\*\s+\*", line)
+            if timeout_match:
+                hop_num_str = timeout_match.group(1)
+                hop_num = int(hop_num_str)
+                hops_list.append({'hop': hop_num, 'ip': 'Timeout', 'hostname': 'Timeout'})
+                add_finding_func(
+                    managed_findings,
+                    SEVERITY_INFO,
+                    f"Traceroute to {target_host} - Hop {hop_num}",
+                    "Request timed out for this hop.",
+                    "Timeouts can indicate filtering or unresponsive devices."
+                )
+
+
+    if not hops_list and output: # If regex failed to parse anything but there was output
+        add_finding_func(managed_findings, SEVERITY_LOW, f"Traceroute Parsing Incomplete for {target_host}",
+                         f"Could not parse any hops from traceroute output. Raw output: {output[:200]}...", # Show first 200 chars
+                         "Review module's regex if valid hops were present in output.")
+    elif hops_list:
+        add_finding_func(
+            managed_findings,
+            SEVERITY_INFO,
+            f"Traceroute to {target_host} Completed",
+            f"{len(hops_list)} hops identified.",
+            f"Path to {target_host} has been recorded."
+        )
+    
+    # Store the list of hop dicts
+    # This assumes managed_stats['network']['traceroute_results'] is a managed dict
+    managed_stats['network']['traceroute_results'][target_host] = hops_list
+
+    print(f"{COLOR_GREEN}[+] Traceroute to {target_host} finished.{COLOR_RESET}")

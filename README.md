@@ -7,9 +7,9 @@
 #############################################
 ```
 
-**Guardian is a network security scanner designed to provide in-depth security posture analysis of network configurations and listening services.**
+**Guardian is a network security scanner designed to provide in-depth security posture analysis of network configurations, listening services, active local network traffic, and remote targets.**
 
-It gathers network interface information, analyzes SSH configurations, examines authentication logs, and identifies potential vulnerabilities or misconfigurations related to network security.
+It gathers network interface information, analyzes SSH configurations, examines authentication logs, summarizes active local connections, traces routes to external targets, profiles remote hosts by scanning common ports, and identifies potential vulnerabilities or misconfigurations related to network security.
 
 ## Features
 
@@ -20,11 +20,19 @@ Guardian performs a range of network-focused checks, organized into modules:
     *   Discovers all listening TCP and UDP ports.
     *   Analyzes listening ports for risky services (e.g., Telnet, FTP), unencrypted protocols (HTTP), and services exposed on all interfaces.
     *   Correlates listening ports with process IDs, names, and users (requires appropriate permissions).
+    *   **Traceroute**: Identifies the hops (routers) to a specified target host, including IP addresses and reverse DNS lookups.
+*   **Local Traffic Analysis (`local_traffic_analyzer.py`)**:
+    *   Summarizes active network connections on the host (TCP and UDP).
+    *   Identifies processes associated with these active connections.
+    *   Focuses on established ingress/egress connections, providing insights into current network communication entry/exit points.
 *   **SSH Configuration Analysis (`ssh_analysis.py`)**:
     *   Analyzes `/etc/ssh/sshd_config` for insecure settings such as Protocol 1, root login, password authentication, empty passwords, and X11 forwarding.
     *   Checks settings like `MaxAuthTries`, `LoginGraceTime`, and client keep-alives.
 *   **Log Analysis (`log_analysis.py`)**:
     *   Analyzes `/var/log/auth.log` (or equivalent system authentication log) for failed login attempts, successful SSH logins, and `sudo` command usage, providing insights into potential unauthorized access attempts or misuse.
+*   **Target Host Profiling (`target_profiler.py`)**:
+    *   Performs a basic TCP port scan on a specified remote target host for common service ports (e.g., 21, 22, 23, 25, 53, 80, 443, 3306, 3389, 8080).
+    *   Attempts to grab service banners from open ports to identify running services.
 *   **Concurrency**: Utilizes Python's `multiprocessing` to run checks concurrently for improved performance.
 
 ## Requirements
@@ -57,6 +65,12 @@ Run the script with Python 3. Root privileges are recommended:
 ```bash
 sudo python3 guardian.py
 ```
+
+To utilize the traceroute and target profiling features, specify a target host:
+```bash
+sudo python3 guardian.py --target-host <hostname_or_IP>
+```
+The `--target-host` argument is required for the traceroute and remote target profiling modules to run. Other local scan modules will run regardless of this argument.
 
 **Output:**
 
@@ -103,17 +117,24 @@ except Exception as e:
 
 The core logic is broken down into modules within the `modules/` directory:
 
-*   `utils.py`: Shared constants (colors, severities).
-*   `network_scan.py`: Interface, IP, and listening port scanning.
+*   `utils.py`: Shared constants (colors, severities), and helper functions like `run_command`.
+*   `network_scan.py`: Interface, IP, listening port scanning, and traceroute functionality.
+*   `local_traffic_analyzer.py`: Analysis of active local network connections.
 *   `ssh_analysis.py`: SSH daemon configuration checks.
 *   `log_analysis.py`: Authentication log checks.
+*   `target_profiler.py`: Remote target port scanning and banner grabbing.
 
 ## OPSEC Considerations
 
 *   **Privileges**: Running as root provides the most comprehensive scan (e.g., for correlating network services to PIDs and users, or accessing restricted log files) but also carries inherent risks.
-*   **Network Impact**: The current network scanning components are passive (checking local listening ports and interfaces). Be mindful of network policies if active scanning capabilities are added in the future.
+*   **Network Impact (Passive vs. Active)**:
+    *   Most local scanning components are passive (checking local listening ports, interfaces, configurations, logs).
+    *   **Active Measures**: The **traceroute** and **target profiling** (port scanning, banner grabbing) features are *active* measures.
+        *   Traceroute sends packets to discover routes and is generally considered low risk, but it does interact with intermediate network devices.
+        *   Port scanning a remote target is a direct interaction and **can be easily detected by the target system's firewalls, Intrusion Detection/Prevention Systems (IDS/IPS), and logging mechanisms.**
+        *   **Users must ensure they have explicit permission to scan any remote targets.** Unauthorized scanning can be unethical or illegal.
 *   **System Load**: While less intensive than full system scans, network and log analysis can still consume resources. The use of multiprocessing helps, but be aware of potential load.
-*   **Log Noise**: Some checks, especially informational ones from log analysis, can generate significant output. The findings are prioritized by severity.
+*   **Log Noise**: Some checks, especially informational ones from log analysis or active connection listings, can generate significant output. The findings are prioritized by severity.
 *   **False Positives/Negatives**: While efforts are made to be accurate, security scanning can sometimes produce false positives or miss things. Results should always be reviewed and correlated with other information.
 
 ## Contributing
