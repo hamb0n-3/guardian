@@ -7,9 +7,9 @@
 #############################################
 ```
 
-**Guardian is a network security scanner designed to provide in-depth security posture analysis of network configurations, listening services, active local network traffic, and remote targets. It also includes capabilities to detect potential ARP and DNS spoofing on the local network, analyze SSL/TLS certificates of remote services, and identify local or (experimentally) remote interfaces operating in promiscuous mode.**
+**Guardian is a network security scanner designed to provide in-depth security posture analysis. It examines network configurations, listening services, active local network traffic (including protocol and approximate volume insights on Linux), and remote targets. The scanner also includes capabilities to detect potential ARP and DNS spoofing, analyze SSL/TLS certificates, identify promiscuous mode interfaces, and perform detailed traceroute analysis (with RTT and packet loss statistics).**
 
-It gathers network interface information, analyzes SSH configurations, examines authentication logs, summarizes active local connections, traces routes to external targets, profiles remote hosts by scanning common ports (including SSL/TLS certificate analysis for HTTPS services), analyzes the local ARP cache for anomalies, compares DNS resolutions to detect potential spoofing, checks for local promiscuous mode interfaces, and (experimentally) probes remote targets for promiscuous mode. This helps identify potential vulnerabilities or misconfigurations related to network security and potential sniffing activities.
+It gathers network interface information, analyzes SSH configurations, examines authentication logs, summarizes active local connections with protocol and traffic volume details (Linux-specific for volume), traces routes to external targets with per-hop RTT/loss analysis, profiles remote hosts by scanning common ports (including SSL/TLS certificate analysis for HTTPS services), analyzes the local ARP cache for anomalies, compares DNS resolutions to detect potential spoofing, checks for local promiscuous mode interfaces, and (experimentally) probes remote targets for promiscuous mode. This helps identify potential vulnerabilities or misconfigurations related to network security and potential sniffing activities.
 
 ## Features
 
@@ -20,11 +20,13 @@ Guardian performs a range of network-focused checks, organized into modules:
     *   Discovers all listening TCP and UDP ports.
     *   Analyzes listening ports for risky services (e.g., Telnet, FTP), unencrypted protocols (HTTP), and services exposed on all interfaces.
     *   Correlates listening ports with process IDs, names, and users (requires appropriate permissions).
-    *   **Traceroute**: Identifies the hops (routers) to a specified target host, including IP addresses and reverse DNS lookups.
+    *   **Traceroute**: Identifies hops to a target, including IP, hostname, and now provides detailed Round-Trip Time (RTT) statistics (min/avg/max) and packet loss percentage per hop. Generates findings for high latency or loss.
 *   **Local Traffic Analysis (`local_traffic_analyzer.py`)**:
     *   Summarizes active network connections on the host (TCP and UDP).
     *   Identifies processes associated with these active connections.
     *   Focuses on established ingress/egress connections, providing insights into current network communication entry/exit points.
+    *   Attempts basic application-layer protocol identification (e.g., HTTP, TLS/SSL, SSH) for active TCP connections on common ports.
+    *   On Linux systems, provides experimental traffic volume analysis (approximate bytes sent/received) for established TCP connections by parsing `ss` command output.
 *   **SSH Configuration Analysis (`ssh_analysis.py`)**:
     *   Analyzes `/etc/ssh/sshd_config` for insecure settings such as Protocol 1, root login, password authentication, empty passwords, and X11 forwarding.
     *   Checks settings like `MaxAuthTries`, `LoginGraceTime`, and client keep-alives.
@@ -100,7 +102,7 @@ The DNS Spoofing Detection module runs by default but will skip its checks and i
 3.  **Warnings/Errors**: Any errors encountered during the scan (e.g., permission denied, file not found) will be printed, often in red or yellow.
 4.  **Scan Summary**:
     *   **Findings by Severity**: A count of findings categorized as CRITICAL, HIGH, MEDIUM, LOW, INFO.
-    *   **Key Statistics Gathered**: A summary of key metrics collected by the modules. This includes OS info, resource usage, network counts, environment type, and specific results for profiled targets like open ports, banners, and SSL/TLS certificate details (subject, issuer, validity, HSTS presence, warnings like hostname mismatch or expiration).
+    *   **Key Statistics Gathered**: A summary of key metrics collected by the modules. This includes network interface details, listening port counts, SSH configuration notes, log analysis summaries (failed logins, sudo commands), active connection counts (with protocol identification and, on Linux, traffic volume estimates), detailed traceroute results (including RTT and packet loss per hop), remote target profiles (open ports, banners, SSL/TLS certificate details), and MiTM detection results (ARP, DNS, promiscuous mode).
 5.  **Detailed Findings**: A list of all findings, sorted by severity (Critical first), including:
     *   Severity Level
     *   Title
@@ -139,8 +141,8 @@ except Exception as e:
 The core logic is broken down into modules within the `modules/` directory:
 
 *   `utils.py`: Shared constants (colors, severities), and helper functions like `run_command`.
-*   `network_scan.py`: Interface, IP, listening port scanning, and traceroute functionality.
-*   `local_traffic_analyzer.py`: Analysis of active local network connections.
+*   `network_scan.py`: Interface, IP, listening port scanning, and traceroute functionality with detailed RTT and packet loss analysis for traceroute.
+*   `local_traffic_analyzer.py`: Analysis of active local network connections, including protocol identification and (Linux-specific) traffic volume estimation.
 *   `ssh_analysis.py`: SSH daemon configuration checks.
 *   `log_analysis.py`: Authentication log checks.
 *   `target_profiler.py`: Remote target port scanning, banner grabbing, and SSL/TLS certificate analysis.

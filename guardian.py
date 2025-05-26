@@ -294,13 +294,41 @@ def display_summary(final_findings, final_statistics):
         traceroute_data = stats_copy['network']['traceroute_results']
         if traceroute_data: # Check if not empty
             print(f"\n{COLOR_YELLOW}{COLOR_BOLD}Traceroute Results:{COLOR_RESET}")
-            for target, hops_or_error in traceroute_data.items():
+            for target, hops_list_or_error in traceroute_data.items():
                 print(f"  {COLOR_CYAN}Target: {target}{COLOR_RESET}")
-                if isinstance(hops_or_error, list) and hops_or_error and 'error' not in hops_or_error[0]:
-                    for hop_info in hops_or_error:
-                        print(f"    Hop {hop_info.get('hop', 'N/A')}: {hop_info.get('ip', 'N/A')} ({hop_info.get('hostname', 'N/A')})")
-                elif isinstance(hops_or_error, list) and hops_or_error and 'error' in hops_or_error[0]:
-                    print(f"    Error: {hops_or_error[0]['error']}")
+                if isinstance(hops_list_or_error, list) and hops_list_or_error:
+                    if 'error' in hops_list_or_error[0]: # Check if the first item is an error dict
+                        print(f"    {COLOR_RED}Error: {hops_list_or_error[0]['error']}{COLOR_RESET}")
+                    else:
+                        for hop_info in hops_list_or_error:
+                            hop_num = hop_info.get('hop', 'N/A')
+                            ip_addr = hop_info.get('ip', 'N/A')
+                            hostname = hop_info.get('hostname', 'N/A')
+                            avg_rtt = hop_info.get('avg_rtt', float('inf')) # Default to inf for N/A case
+                            min_rtt = hop_info.get('min_rtt', float('inf'))
+                            max_rtt = hop_info.get('max_rtt', float('inf'))
+                            packet_loss = hop_info.get('packet_loss', 100.0) # Default to 100% loss
+
+                            # Prepare RTT display string
+                            if avg_rtt == float('inf') and min_rtt == float('inf') and max_rtt == float('inf'):
+                                rtt_display = "N/A"
+                            else:
+                                rtt_display = f"{min_rtt:.2f}/{avg_rtt:.2f}/{max_rtt:.2f}ms"
+                            
+                            loss_display = f"{packet_loss:.0f}%"
+                            if packet_loss == 100.0 and ip_addr == "Timeout":
+                                loss_display += " (Timeout)"
+
+                            line_color = COLOR_RESET
+                            if packet_loss > 50: # High loss
+                                line_color = COLOR_RED
+                            elif packet_loss > 10: # Moderate loss
+                                line_color = COLOR_YELLOW
+                            elif avg_rtt > 200 and avg_rtt != float('inf'): # High RTT
+                                line_color = COLOR_YELLOW
+                            
+                            print(f"{line_color}    Hop {hop_num:>2}: {ip_addr:<15} ({hostname if hostname != ip_addr else 'No RevDNS'}) "
+                                  f"- RTT(min/avg/max): {rtt_display:<20} Loss: {loss_display}{COLOR_RESET}")
                 else:
                     print(f"    No hops found or traceroute failed for {target}.")
             stats_printed = True
