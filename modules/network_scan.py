@@ -11,7 +11,7 @@ import subprocess
 import re
 from modules.utils import (
     COLOR_GREEN, COLOR_RED, COLOR_YELLOW, COLOR_RESET,
-    SEVERITY_INFO, SEVERITY_LOW, SEVERITY_MEDIUM, SEVERITY_HIGH
+    SEVERITY_INFO, SEVERITY_LOW, SEVERITY_MEDIUM, SEVERITY_HIGH, SEVERITY_CRITICAL
 )
 
 def get_network_interfaces(managed_stats, managed_findings, add_finding_func):
