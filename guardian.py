@@ -203,6 +203,22 @@ def run_environment_detection_wrapper(managed_stats, managed_findings):
         logger.error(f"Process Error in {module_name}: {e}")
         add_finding_mp(managed_findings, SEVERITY_HIGH, f"Module Error: {module_name}", f"Failed to run: {e}")
 
+def run_traceroute_analysis_wrapper(managed_stats, managed_findings):
+    """Wrapper to run the traceroute analysis module in a separate process."""
+    logger = logging.getLogger(f"guardian.{run_traceroute_analysis_wrapper.__name__}")
+    module_name = "network_scan (traceroute)"
+    # Define default target(s) for traceroute. Could be made configurable later.
+    # For now, using a common public DNS server.
+    default_target = "8.8.8.8" 
+    try:
+        logger.info(f"Starting module: {module_name} for target {default_target}")
+        # network_scan.perform_traceroute was designed to be called directly
+        network_scan.perform_traceroute(managed_stats, managed_findings, add_finding_mp, default_target)
+        logger.info(f"Finished module: {module_name} for target {default_target}")
+    except Exception as e:
+        logger.error(f"Process Error in {module_name} for target {default_target}: {e}")
+        add_finding_mp(managed_findings, SEVERITY_HIGH, f"Module Error: {module_name} ({default_target})", f"Failed to run: {e}")
+
 # --- Helper Functions (Output Formatting) ---
 
 def print_banner():
@@ -276,9 +292,31 @@ def display_summary(final_findings, final_statistics):
         stats_printed = True
     if 'processes' in stats_copy:
         proc_stats = stats_copy['processes']
-        if 'count' in proc_stats:
-            print(f"  Running Processes: {proc_stats.get('count', 0)} found")
+        process_list = proc_stats.get('list', [])
+        print(f"  Running Processes: {proc_stats.get('count', 0)} found")
+
+        # Summarize network activity and I/O from processes
+        procs_with_net_connections = 0
+        total_bytes_sent = 0
+        total_bytes_read = 0
+        for proc_data in process_list:
+            if proc_data.get('network_connections') and len(proc_data['network_connections']) > 0:
+                procs_with_net_connections += 1
+            if isinstance(proc_data.get('bytes_sent'), int) and proc_data.get('bytes_sent') > 0:
+                total_bytes_sent += proc_data['bytes_sent']
+            if isinstance(proc_data.get('bytes_read'), int) and proc_data.get('bytes_read') > 0:
+                total_bytes_read += proc_data['bytes_read']
+        
+        if procs_with_net_connections > 0:
+            print(f"    Processes with Network Connections: {procs_with_net_connections}")
+        
+        if total_bytes_sent > 0 or total_bytes_read > 0:
+            # Simple MB conversion for summary
+            total_mb_sent = total_bytes_sent / (1024 * 1024)
+            total_mb_read = total_bytes_read / (1024 * 1024)
+            print(f"    Total Process I/O: {total_mb_sent:.2f} MB Written / {total_mb_read:.2f} MB Read (approx.)")
         stats_printed = True
+
     if 'users' in stats_copy:
         user_stats = stats_copy['users']
         # Access list proxies safely
@@ -349,124 +387,146 @@ def display_summary(final_findings, final_statistics):
         if risky_services > 0: print(f"    Potentially Risky Services: {risky_services}")
         if frequent_timers > 0: print(f"    Frequent Timers Flagged: {frequent_timers}")
         stats_printed = True
+    
+    if 'network' in stats_copy and 'traceroute' in stats_copy['network']:
+        traceroute_stats = stats_copy['network']['traceroute']
+        print(f"\n  {COLOR_BLUE}{COLOR_BOLD}Traceroute Analysis:{COLOR_RESET}")
+        if not traceroute_stats:
+            print(f"    {COLOR_YELLOW}No traceroute data collected.{COLOR_RESET}")
+        else:
+            for target, trace_data in traceroute_stats.items():
+                print(f"    Target: {COLOR_CYAN}{target}{COLOR_RESET}")
+                if trace_data.get('error'):
+                    print(f"      Status: {COLOR_RED}Error - {trace_data['error']}{COLOR_RESET}")
+                elif not trace_data.get('hops'):
+                    summary_msg = trace_data.get('summary', "No hops recorded and no specific error.")
+                    print(f"      Status: {COLOR_YELLOW}{summary_msg}{COLOR_RESET}")
+                else:
+                    hops = trace_data['hops']
+                    summary_msg = trace_data.get('summary', f"Trace completed with {len(hops)} hops.")
+                    print(f"      Status: {COLOR_GREEN}{summary_msg}{COLOR_RESET}")
+                    
+                    rtts = [h['rtt_ms'] for h in hops if h['rtt_ms'] is not None]
+                    avg_rtt = sum(rtts) / len(rtts) if rtts else 0
+                    max_rtt = max(rtts) if rtts else 0
+                    
+                    notable_hops_issues = []
+                    for hop in hops:
+                        if hop['rtt_ms'] and hop['rtt_ms'] > 200: # High RTT
+                            notable_hops_issues.append(f"Hop {hop['hop']} ({hop['ip']}): High RTT {hop['rtt_ms']:.2f}ms")
+                        elif hop['packet_loss_percent'] == 100.0 and hop['ip'] != "N/A (Timeout)": # Explicit loss not just timeout
+                             notable_hops_issues.append(f"Hop {hop['hop']} ({hop['ip']}): Packet Loss")
+                        elif hop['ip'] == "N/A (Timeout)":
+                             notable_hops_issues.append(f"Hop {hop['hop']}: Timeout")
+                    
+                    print(f"      Hops: {len(hops)}, Avg RTT: {avg_rtt:.2f}ms, Max RTT: {max_rtt:.2f}ms")
+                    if notable_hops_issues:
+                        print(f"      Notable Issues ({len(notable_hops_issues)}):")
+                        for issue in notable_hops_issues[:3]: # Print first 3 notable issues
+                            print(f"        - {issue}")
+                        if len(notable_hops_issues) > 3:
+                            print(f"        ... and {len(notable_hops_issues) - 3} more.")
+                stats_printed = True
+        print("-" * 40) # Separator for traceroute section
     # --- End NEW Module Statistics ---
 
     if not stats_printed:
         print(f"  {COLOR_YELLOW}No statistics gathered or modules run.{COLOR_RESET}")
 
     # --- Interactive Detailed Findings ---
+    # The process list with connection/traffic details will be in the JSON.
+    # For console summary, high-level process stats are already printed.
+    # Specific process details could be shown if a finding related to that process is selected.
+    
     if total_findings > 0:
         print(f"\n{COLOR_CYAN}{COLOR_BOLD}--- Detailed Findings ---{COLOR_RESET}")
         
-        severity_map = {
+        severity_map = { # Ensure this map is comprehensive for user input
             'C': SEVERITY_CRITICAL,
             'H': SEVERITY_HIGH,
             'M': SEVERITY_MEDIUM,
             'L': SEVERITY_LOW,
-            'I': SEVERITY_INFO
+            'I': SEVERITY_INFO,
+            'A': 'ALL', # For 'All' option
+            'Q': 'QUIT', # For 'Quit' option
+            'N': 'QUIT'  # For 'No' as a quit option
         }
-        # Order for displaying if 'All' is chosen
         severity_display_order_all = [SEVERITY_CRITICAL, SEVERITY_HIGH, SEVERITY_MEDIUM, SEVERITY_LOW, SEVERITY_INFO]
 
-        while True: # Loop for iterative selection
-            prompt_message = (
-                f"\nSelect severities to view (e.g., C,H or M), or:\n"
-                f"  (C)ritical, (H)igh, (M)edium, (L)ow, (I)nfo\n"
-                f"  (A)ll findings, (Q)uit detailed view: "
-            )
-            
-            user_input_raw = ""
-            try:
-                user_input_raw = input(f"{COLOR_YELLOW}{prompt_message}{COLOR_RESET}").strip().upper()
-            except EOFError: # Non-interactive environment
-                print(f"  {COLOR_YELLOW}No input received (non-interactive environment?). Skipping interactive drill-down.{COLOR_RESET}")
-                print(f"  {COLOR_YELLOW}All findings are available in the JSON report.{COLOR_RESET}")
-                break # Exit the while loop
-            except Exception as e: # Catch other potential input errors
-                print(f"  {COLOR_RED}An error occurred during input: {e}. Skipping detailed findings.{COLOR_RESET}")
-                break # Exit the while loop
+        while True:
+            # Loop for interactive severity selection
+            while True:
+                prompt_message = (
+                    f"\nSelect severities to view (e.g., C,H or M), or:\n"
+                    f"  (C)ritical, (H)igh, (M)edium, (L)ow, (I)nfo\n"
+                    f"  (A)ll findings, (Q)uit detailed view: "
+                )
+                user_input_raw = ""
+                try:
+                    user_input_raw = input(f"{COLOR_YELLOW}{prompt_message}{COLOR_RESET}").strip().upper()
+                except EOFError:
+                    logger.warning("EOFError received, likely non-interactive environment. Skipping detailed findings.")
+                    print(f"\n  {COLOR_YELLOW}Skipping interactive detailed findings (non-interactive environment). Full report in JSON.{COLOR_RESET}")
+                    return # Exit display_summary
+                except Exception as e:
+                    logger.error(f"Error during input for detailed findings: {e}")
+                    print(f"\n  {COLOR_RED}Error during input. Skipping detailed findings. Full report in JSON.{COLOR_RESET}")
+                    return # Exit display_summary
 
-            if not user_input_raw: # User pressed Enter without input
-                print(f"  {COLOR_YELLOW}No selection made. Please enter a valid option.{COLOR_RESET}")
-                continue # Continue to next iteration of the while loop
-
-            # Handle single char 'Q' or 'N' for quit, or 'A' for all, before splitting by comma
-            if user_input_raw == 'Q' or user_input_raw == 'N':
-                print(f"  {COLOR_GREEN}Exiting detailed findings view.{COLOR_RESET}")
-                break # Exit the while loop
-            
-            if user_input_raw == 'A':
-                print(f"  {COLOR_GREEN}Displaying all findings:{COLOR_RESET}")
-                any_displayed_for_all = False
-                for severity_level in severity_display_order_all:
-                    findings_for_level = final_findings.get(severity_level, [])
-                    if findings_for_level:
-                        print(f"  {COLOR_CYAN}--- Findings for {severity_level} ---{COLOR_RESET}")
-                        for finding in findings_for_level:
-                            print_finding(severity_level, finding['title'], finding['description'], finding.get('recommendation', 'N/A'))
-                            any_displayed_for_all = True
-                if not any_displayed_for_all:
-                    print(f"  {COLOR_GREEN}No findings were reported across all severities.{COLOR_RESET}")
-                break # Exit the while loop after 'A' (as 'All' is a terminal action for the loop)
-
-            # Process comma-separated inputs
-            choices = [choice.strip() for choice in user_input_raw.split(',')]
-            processed_any_valid_choice_this_iteration = False
-
-            for selected_severity_code in choices:
-                if not selected_severity_code: # Skip empty strings if input was e.g. "C,,"
+                if not user_input_raw:
+                    print(f"  {COLOR_YELLOW}No selection. Please enter a valid option or Q to quit.{COLOR_RESET}")
                     continue
 
-                # Check again for Q/N/A within comma-separated values, though less conventional.
-                # Primary handling for these is as standalone inputs.
-                if selected_severity_code == 'Q' or selected_severity_code == 'N':
-                    print(f"  {COLOR_GREEN}Exiting detailed findings view (Quit signal found in list).{COLOR_RESET}")
-                    return # Exit display_summary function entirely if Q/N found within list
+                selected_options = [opt.strip() for opt in user_input_raw.split(',')]
                 
-                if selected_severity_code == 'A':
-                    print(f"  {COLOR_GREEN}Displaying all findings (All signal found in list):{COLOR_RESET}")
-                    # This inner 'A' will also display all and then we should break the outer loop.
-                    # To avoid deep breaks, just call the 'A' logic and then return from display_summary.
-                    # This means an 'A' within a list like "C,A,H" will show C, then all, then stop.
-                    all_displayed = False
-                    for sev_level in severity_display_order_all:
-                        f_for_level = final_findings.get(sev_level, [])
-                        if f_for_level:
-                            print(f"  {COLOR_CYAN}--- Findings for {sev_level} ---{COLOR_RESET}")
-                            for f_item in f_for_level:
-                                print_finding(sev_level, f_item['title'], f_item['description'], f_item.get('recommendation', 'N/A'))
-                                all_displayed = True
-                    if not all_displayed:
+                # Check for Quit or All as standalone first
+                if 'Q' in selected_options or 'N' in selected_options : # 'N' also for "No more"
+                    print(f"  {COLOR_GREEN}Exiting detailed findings view.{COLOR_RESET}")
+                    return # Exit display_summary
+                
+                if 'A' in selected_options:
+                    print(f"  {COLOR_GREEN}Displaying all findings:{COLOR_RESET}")
+                    any_displayed = False
+                    for severity_level in severity_display_order_all:
+                        findings_list = final_findings.get(severity_level, [])
+                        if findings_list:
+                            print(f"  {COLOR_CYAN}--- Findings for {severity_level} ({len(findings_list)}) ---{COLOR_RESET}")
+                            for finding in findings_list:
+                                print_finding(severity_level, finding['title'], finding['description'], finding.get('recommendation', 'N/A'))
+                                # Here you could add process details if finding is process-related
+                                # For example: if "PID:" in finding['description']: display_process_details_for_finding(final_stats, finding)
+                            any_displayed = True
+                    if not any_displayed:
                         print(f"  {COLOR_GREEN}No findings were reported across all severities.{COLOR_RESET}")
-                    return # Exit display_summary function
+                    # 'A' implies showing all and then finishing this interactive section.
+                    return # Exit display_summary
 
-                mapped_severity = severity_map.get(selected_severity_code)
+                # Process individual severity codes
+                displayed_this_round = False
+                for code in selected_options:
+                    mapped_severity = severity_map.get(code)
+                    if mapped_severity and mapped_severity not in ['ALL', 'QUIT']:
+                        findings_list = final_findings.get(mapped_severity, [])
+                        if findings_list:
+                            print(f"  {COLOR_CYAN}--- Findings for {mapped_severity} ({len(findings_list)}) ---{COLOR_RESET}")
+                            for finding in findings_list:
+                                print_finding(mapped_severity, finding['title'], finding['description'], finding.get('recommendation', 'N/A'))
+                            displayed_this_round = True
+                        else:
+                            print(f"  {COLOR_YELLOW}No findings for severity '{code}' ({mapped_severity}).{COLOR_RESET}")
+                            displayed_this_round = True # Valid code, just no findings
+                    elif not mapped_severity: # Unknown code
+                        print(f"  {COLOR_RED}Unknown severity code '{code}'. Ignored.{COLOR_RESET}")
+                
+                if not displayed_this_round and selected_options: # If input was given but nothing valid was processed
+                    print(f"  {COLOR_YELLOW}No valid severity codes entered for display. Try C, H, M, L, I, A, or Q.{COLOR_RESET}")
+                # Loop continues for more selections
 
-                if mapped_severity:
-                    findings_for_level = final_findings.get(mapped_severity, [])
-                    if findings_for_level:
-                        print(f"  {COLOR_CYAN}--- Findings for {mapped_severity} ---{COLOR_RESET}")
-                        for finding in findings_for_level:
-                            print_finding(mapped_severity, finding['title'], finding['description'], finding.get('recommendation', 'N/A'))
-                        processed_any_valid_choice_this_iteration = True
-                    else:
-                        print(f"  {COLOR_YELLOW}No findings reported for severity '{selected_severity_code}' ({mapped_severity}).{COLOR_RESET}")
-                        processed_any_valid_choice_this_iteration = True # It was a valid code, just no findings
-                else:
-                    print(f"  {COLOR_RED}Warning: Unknown severity code '{selected_severity_code}'. It will be ignored.{COLOR_RESET}")
-            
-            if not processed_any_valid_choice_this_iteration and choices:
-                 # This means user entered something, but none of it was a recognized severity code
-                 # (or Q/A if we didn't handle them to break earlier)
-                 # The individual warnings for unknown codes would have already printed.
-                 # No additional general message needed here as specific errors are shown.
-                 pass 
-            # Loop continues for next prompt unless 'A' or 'Q'/"N" was processed to break/return.
-
+    # This part is reached if total_findings == 0 OR if the user quits the interactive loop
     elif total_findings == 0:
-        pass # Already handled by the initial check for total_findings
-    else: # Should not be reached
-        print(f"  {COLOR_GREEN}No findings reported by the scan.{COLOR_RESET}")
+        # Already handled by the "No significant security findings reported" message earlier
+        pass
+    # Implicit else: if user quit, the "Exiting detailed findings view" message was already printed.
 
 
 # --- Logging Setup Function ---
@@ -603,6 +663,7 @@ def main():
             run_log_analysis_wrapper,
             run_services_timers_wrapper,
             run_environment_detection_wrapper,
+            run_traceroute_analysis_wrapper, # Added traceroute wrapper
             # Add future module wrappers here
         ]
 
