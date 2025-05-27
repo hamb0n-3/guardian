@@ -10,7 +10,7 @@ import re
 import stat # For permission constants like S_IWOTH, S_ISUID, S_ISGID, S_ISVTX
 from modules.utils import (
     COLOR_GREEN, COLOR_RED, COLOR_YELLOW, COLOR_RESET,
-    SEVERITY_INFO, SEVERITY_LOW, SEVERITY_MEDIUM, SEVERITY_HIGH
+    SEVERITY_INFO, SEVERITY_LOW, SEVERITY_MEDIUM, SEVERITY_HIGH, SEVERITY_CRITICAL
 )
 
 # Paths to exclude from all recursive scans more reliably

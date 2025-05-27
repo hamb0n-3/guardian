@@ -12,7 +12,10 @@ from datetime import datetime
 
 # Remove direct import of add_finding from guardian
 # from guardian import add_finding
-from modules.utils import SEVERITY_INFO, SEVERITY_HIGH, COLOR_RED, COLOR_RESET, COLOR_GREEN
+from modules.utils import (
+    COLOR_GREEN, COLOR_RED, COLOR_YELLOW, COLOR_RESET,
+    SEVERITY_CRITICAL, SEVERITY_HIGH, SEVERITY_MEDIUM, SEVERITY_LOW, SEVERITY_INFO
+)
 
 def get_system_info(managed_stats, managed_findings, add_finding_func):
     """
