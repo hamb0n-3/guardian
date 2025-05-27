@@ -2,18 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-Guardian Module: Network Scanning (Interfaces, Listening Ports, Traceroute)
+Guardian Module: Network Scanning (Interfaces, Listening Ports, Traceroute, DHCP Discovery)
 """
 
 import socket
 import psutil
 import subprocess
-import platform
 import re
 from modules.utils import (
     COLOR_GREEN, COLOR_RED, COLOR_YELLOW, COLOR_RESET,
-    SEVERITY_INFO, SEVERITY_LOW, SEVERITY_MEDIUM, SEVERITY_HIGH,
-    run_command # Assuming run_command is available in utils
+    SEVERITY_INFO, SEVERITY_LOW, SEVERITY_MEDIUM, SEVERITY_HIGH
 )
 
 def get_network_interfaces(managed_stats, managed_findings, add_finding_func):
@@ -356,234 +354,303 @@ def perform_traceroute(managed_stats, managed_findings, add_finding_func, target
         add_finding_func(managed_findings, SEVERITY_HIGH, "Traceroute Unexpected Error", str(e), f"Host: {target_host}, Command: {' '.join(command)}")
         managed_stats['network']['traceroute'][target_host]['error'] = str(e)
         managed_stats['network']['traceroute'][target_host]['summary'] = error_msg
-        
-    managed_stats['network'] = current_network_stats # Reassign to sync 
 
-def trace_route_to_target(managed_stats, managed_findings, add_finding_func, target_host):
-    """Performs a traceroute to the target host."""
-    print(f"{COLOR_GREEN}[*] Starting traceroute to {target_host}...{COLOR_RESET}")
 
-    # Ensure 'network' and 'traceroute_results' keys exist in managed_stats.
+def discover_dhcp_servers(managed_stats, managed_findings, add_finding_func, authorized_dhcp_servers_list=None):
+    """
+    Discovers DHCP servers on the local network segments using Nmap's 
+    'broadcast-dhcp-discover' NSE script. It then compares discovered server IPs
+    against a provided list of authorized DHCP servers to identify potential
+    rogue DHCP servers.
+
+    Methodology:
+    1. Checks if Nmap is installed.
+    2. Executes `sudo nmap --script broadcast-dhcp-discover -oX -` to find DHCP servers.
+       This command requires root privileges to send broadcast probes and listen for responses.
+    3. Parses the XML output from Nmap to extract details of DHCP offers received.
+    4. Compares the 'Server Identifier' (DHCP server's IP) from each offer against
+       the `authorized_dhcp_servers_list`.
+
+    Args:
+        managed_stats (Manager.dict): Shared dictionary to store statistics.
+            Relevant keys:
+            - `managed_stats['network']['dhcp_servers']`: List of dicts, each containing
+              details of a discovered DHCP server offer (server_ip, interface, ip_offered, etc.).
+            - `managed_stats['network']['dhcp_discovery_error']`: Stores error messages if
+              the discovery process fails (e.g., Nmap not found, command error, timeout, XML parse error).
+        managed_findings (Manager.list): Shared list to append findings.
+        add_finding_func (function): Function to add a finding to `managed_findings`.
+        authorized_dhcp_servers_list (list, optional): A list of IP addresses of known,
+            authorized DHCP servers. If `None` or empty (default), any discovered DHCP
+            server will be flagged with a higher severity or noted as unconfirmed.
+
+    Findings Generated:
+    - SEVERITY_CRITICAL ("Rogue DHCP Server Detected"): If a discovered DHCP server's IP
+      is not in the `authorized_dhcp_servers_list`.
+    - SEVERITY_INFO ("Authorized DHCP Server Found"): If a discovered server's IP matches
+      an entry in `authorized_dhcp_servers_list`.
+    - SEVERITY_LOW ("No DHCP Offers Received"): If the Nmap scan completes successfully
+      but no DHCP offers are detected.
+    - SEVERITY_INFO ("No DHCP Offers Parsed or Detected"): If Nmap runs but no valid DHCP
+      details are parsed from its output.
+    - SEVERITY_HIGH ("Nmap Not Found for DHCP Discovery"): If Nmap is not installed.
+    - SEVERITY_HIGH ("Nmap DHCP Discovery Failed", "Nmap DHCP Discovery Timed Out",
+      "Nmap DHCP XML Parse Error", "Nmap DHCP Discovery System Error"): For various
+      Nmap execution or parsing failures.
+
+    Requirements:
+    - Nmap: Must be installed and in the system's PATH.
+    - Root Privileges: The Nmap command used requires root privileges to function correctly.
+      Guardian (or this script if run standalone) must be executed with `sudo`.
+    """
+    if authorized_dhcp_servers_list is None:
+        authorized_dhcp_servers_list = []
+
+    print(f"{COLOR_GREEN}[*] Discovering DHCP servers on the network...{COLOR_RESET}")
+
+    # Initialize stats entries
     if 'network' not in managed_stats:
-        managed_stats['network'] = {} 
-    if 'traceroute_results' not in managed_stats['network']:
-        managed_stats['network']['traceroute_results'] = {}
-        
-    system = platform.system()
-    
-    # Regex definitions
-    # Linux/macOS: captures hop, IP, and the RTT string (e.g., "0.300 ms  0.250 ms  0.200 ms" or "* 0.800 ms *")
-    linux_hop_regex = re.compile(r"^\s*(\d+)\s+([\d\.]+)\s+((?:[\d\.]+\s+ms|\*)\s*(?:[\d\.]+\s+ms|\*){0,2})")
-    # Windows: captures hop, RTT string, and IP
-    windows_hop_regex = re.compile(r"^\s*(\d+)\s+((?:<?\d+\s+ms|\*)\s+(?:<?\d+\s+ms|\*)\s+(?:<?\d+\s+ms|\*))\s+([\d\.]+)")
-    # Windows timeout line: "  1     *        *        *     Request timed out."
-    windows_timeout_regex = re.compile(r"^\s*(\d+)\s+(\*\s+\*\s+\*|\*\s+Request timed out\.|Request timed out\.)")
+        managed_stats['network'] = {}
+    managed_stats['network']['dhcp_servers'] = []
+    managed_stats['network']['dhcp_discovery_error'] = None
 
-
-    if system == "Windows":
-        command = ["tracert", "-d", "-w", "1000", target_host] # -w 1000ms timeout for each reply
-    else: # Linux/macOS
-        # -q 3 (probes per hop), -n (no reverse DNS in command output), -w 1 (wait 1 sec for reply)
-        # Some traceroute versions might use -W for timeout per probe in seconds (float)
-        # Using a common set of flags. Adjust if needed for specific traceroute versions.
-        command = ["traceroute", "-q", "3", "-n", "-w", "1", target_host]
-
-
-    success, output = run_command(command, timeout=90) # Increased timeout for 3 probes with 1s wait each + overhead
-
-    if not success or not output:
-        error_msg = f"Traceroute command failed or returned no output for {target_host}."
-        if output: error_msg += f" Output: {output.strip()}"
-        print(f"{COLOR_RED}Error: {error_msg}{COLOR_RESET}")
-        add_finding_func(managed_findings, SEVERITY_HIGH, "Traceroute Execution Failed", error_msg, f"Verify '{command[0]}' is installed and {target_host} is reachable.")
-        managed_stats['network']['traceroute_results'][target_host] = [{'error': error_msg}]
+    # 1. Check for Nmap installation
+    try:
+        nmap_check_process = subprocess.run(['nmap', '--version'], capture_output=True, text=True, timeout=10)
+        if nmap_check_process.returncode != 0:
+            error_msg = f"Nmap version check failed. Stderr: {nmap_check_process.stderr}"
+            raise FileNotFoundError(error_msg) # Treat as if not found if version check fails oddly
+    except FileNotFoundError:
+        error_desc = "Nmap is required for DHCP server discovery but was not found in PATH."
+        add_finding_func(managed_findings, SEVERITY_HIGH, "Nmap Not Found for DHCP Discovery",
+                         error_desc, "Please install Nmap (e.g., 'sudo apt-get install nmap' or 'sudo yum install nmap').")
+        managed_stats['network']['dhcp_discovery_error'] = error_desc
+        print(f"{COLOR_RED}Error: {error_desc}{COLOR_RESET}")
+        return
+    except subprocess.TimeoutExpired:
+        error_desc = "Nmap --version command timed out. Cannot confirm Nmap installation."
+        add_finding_func(managed_findings, SEVERITY_HIGH, "Nmap Check Timed Out",
+                         error_desc, "Ensure Nmap is installed and accessible. If issues persist, check system load.")
+        managed_stats['network']['dhcp_discovery_error'] = error_desc
+        print(f"{COLOR_RED}Error: {error_desc}{COLOR_RESET}")
         return
 
-    hops_list = []
-    output_lines = output.splitlines()
-    previous_avg_rtt = 0.0
 
-    for line in output_lines:
-        line = line.strip()
-        hop_num_str, ip_address, rtt_string = None, None, None
-        is_timeout_line = False
+    # 2. Construct Nmap command
+    # The script 'broadcast-dhcp-discover' sends a DHCPDISCOVER broadcast.
+    # -oX - outputs XML to stdout.
+    # Nmap needs root/sudo for this script.
+    # The script itself has a default timeout of 10s for waiting for offers.
+    # We add an overall timeout for the subprocess.
+    nmap_command = ["sudo", "nmap", "--script", "broadcast-dhcp-discover", "-oX", "-"]
+    # Using --host-timeout for Nmap itself can be tricky with broadcast scripts.
+    # The script argument broadcast-dhcp-discover.timeout can be used if needed:
+    # nmap_command.extend(["--script-args", "broadcast-dhcp-discover.timeout=5000"]) # 5000ms = 5s
 
-        if system == "Windows":
-            match = windows_hop_regex.match(line)
-            if match:
-                hop_num_str, rtt_string, ip_address = match.groups()
-            else:
-                timeout_match_win = windows_timeout_regex.match(line)
-                if timeout_match_win:
-                    hop_num_str = timeout_match_win.group(1)
-                    ip_address = "Timeout"
-                    rtt_string = "* * *" # Standardize timeout RTT string
-                    is_timeout_line = True
-        else: # Linux/macOS
-            match = linux_hop_regex.match(line)
-            if match:
-                hop_num_str, ip_address, rtt_string = match.groups()
-            else: # Check for lines like " 2  * * *" (all probes timeout)
-                timeout_match_nix = re.match(r"^\s*(\d+)\s+(\*\s*){1,3}$", line)
-                if timeout_match_nix:
-                    hop_num_str = timeout_match_nix.group(1)
-                    ip_address = "Timeout"
-                    rtt_string = "* * *" # Standardize
-                    is_timeout_line = True
+    # 3. Execute Nmap command
+    print(f"{COLOR_GREEN}[*] Running Nmap DHCP discovery: {' '.join(nmap_command)}{COLOR_RESET}")
+    try:
+        # Increased timeout as DHCP discovery can sometimes take a moment for multiple offers.
+        process = subprocess.run(nmap_command, capture_output=True, text=True, timeout=45, check=False)
         
-        if hop_num_str:
-            try:
-                hop_num = int(hop_num_str)
-                rtt_stats = _parse_rtt_string_and_calculate_stats(rtt_string, system)
-                
-                hostname = ip_address
-                if ip_address != "Timeout":
-                    try:
-                        hostname, _, _ = socket.gethostbyaddr(ip_address)
-                    except socket.herror: pass # Keep IP as hostname
-                    except Exception as e_dns:
-                        print(f"{COLOR_YELLOW}Warning: Reverse DNS for {ip_address} failed: {e_dns}{COLOR_RESET}")
+        if process.returncode != 0:
+            # Nmap might return non-zero for various reasons, even if some output is generated.
+            # Check stderr for critical errors.
+            # Warnings like "WARNING: Service 161/udp on 192.168.X.Y is already bound. Skipping." are common and OK.
+            # "Failed to resolve/send to host: <interface_name>" can also appear if an interface is down, not necessarily fatal.
+            # Look for more specific errors like "SCRIPT ENGINE FAILED" or permission issues.
+            stderr_output = process.stderr.strip()
+            if "permission denied" in stderr_output.lower() or "requires root privileges" in stderr_output.lower():
+                 error_msg = f"Nmap DHCP discovery failed due to permission issues. Ensure 'sudo' is used correctly and has permissions. Stderr: {stderr_output}"
+            elif "script engine failed" in stderr_output.lower():
+                 error_msg = f"Nmap script engine failed for DHCP discovery. Stderr: {stderr_output}"
+            else:
+                # Generic failure, could be partial results. Log stderr but proceed to parse stdout if available.
+                error_msg = f"Nmap DHCP discovery finished with return code {process.returncode}. Stderr: {stderr_output}"
+                print(f"{COLOR_YELLOW}Warning: {error_msg}{COLOR_RESET}") 
+                # Don't set dhcp_discovery_error yet, as there might be partial XML data.
 
-                hop_info = {
-                    'hop': hop_num, 'ip': ip_address, 'hostname': hostname,
-                    'rtts_raw': rtt_stats['rtts_parsed'],
-                    'min_rtt': rtt_stats['min_rtt'], 'max_rtt': rtt_stats['max_rtt'],
-                    'avg_rtt': rtt_stats['avg_rtt'], 'packet_loss': rtt_stats['packet_loss_percentage']
-                }
-                hops_list.append(hop_info)
-
-                rtt_summary = f"Avg RTT: {rtt_stats['avg_rtt']:.2f}ms" if rtt_stats['avg_rtt'] != float('inf') else "Avg RTT: N/A"
-                loss_summary = f"Loss: {rtt_stats['packet_loss_percentage']:.0f}%"
-                finding_desc = f"IP: {ip_address} (Hostname: {hostname}), {rtt_summary}, {loss_summary}"
-                add_finding_func(managed_findings, SEVERITY_INFO, f"Traceroute to {target_host} - Hop {hop_num}", finding_desc)
-
-                if rtt_stats['avg_rtt'] != float('inf'): # Check if avg_rtt is valid
-                    if rtt_stats['avg_rtt'] > 200:
-                        add_finding_func(managed_findings, SEVERITY_LOW, f"High Latency Hop: {target_host} - Hop {hop_num}",
-                                         f"Hop {hop_num} ({ip_address}) has an average RTT of {rtt_stats['avg_rtt']:.2f} ms.")
-                    if previous_avg_rtt > 0 and rtt_stats['avg_rtt'] > (previous_avg_rtt * 2 + 10):
-                         add_finding_func(managed_findings, SEVERITY_LOW, f"Significant RTT Jump: {target_host} - Hop {hop_num}",
-                                         f"RTT jumped from {previous_avg_rtt:.2f}ms (Hop {hop_num-1}) to {rtt_stats['avg_rtt']:.2f}ms (Hop {hop_num}).")
-                    previous_avg_rtt = rtt_stats['avg_rtt']
-                elif rtt_stats['packet_loss_percentage'] == 100 and ip_address == "Timeout": # If all probes lost and IP is timeout
-                    previous_avg_rtt = float('inf') # Reset for next hop comparison, or mark as very high
-                
-                if rtt_stats['packet_loss_percentage'] > 10: # Threshold for packet loss finding
-                     add_finding_func(managed_findings, SEVERITY_MEDIUM, f"Packet Loss at Hop: {target_host} - Hop {hop_num}",
-                                     f"Hop {hop_num} ({ip_address}) has {rtt_stats['packet_loss_percentage']:.0f}% packet loss.")
-
-            except ValueError as ve:
-                print(f"{COLOR_YELLOW}Warning: Could not parse hop number for line: '{line}'. Error: {ve}{COLOR_RESET}")
-            except Exception as e_parse:
-                print(f"{COLOR_RED}Error parsing hop details for line '{line}': {e_parse}{COLOR_RESET}")
-                # Add a placeholder if critical info missing but hop_num was parsed
-                if hop_num_str:
-                    hops_list.append({'hop': int(hop_num_str), 'ip': ip_address or 'Parse Error', 'hostname': 'Parse Error', 
-                                      'min_rtt': 'N/A', 'max_rtt': 'N/A', 'avg_rtt': 'N/A', 'packet_loss': 'N/A', 'rtts_raw': [rtt_string]})
+            # If stdout is empty and there was an error, it's a definite failure to record.
+            if not process.stdout.strip() and error_msg: # Check error_msg is defined
+                 managed_stats['network']['dhcp_discovery_error'] = error_msg
+                 add_finding_func(managed_findings, SEVERITY_HIGH, "Nmap DHCP Discovery Failed",
+                                 error_msg, "Check Nmap installation, permissions (sudo), and network interfaces. Ensure Nmap can bind to necessary sockets.")
+                 print(f"{COLOR_RED}Error: {error_msg}{COLOR_RESET}")
+                 # If no stdout, return here. If there is stdout, try to parse it.
+                 return
 
 
-    if not hops_list and output:
-        add_finding_func(managed_findings, SEVERITY_LOW, f"Traceroute Parsing Incomplete for {target_host}",
-                         f"Could not parse any hops from traceroute output. Raw output (first 200 chars): {output[:200]}...",
-                         "Review module's regex if valid hops were present in output.")
-    elif hops_list:
-        add_finding_func(managed_findings, SEVERITY_INFO, f"Traceroute to {target_host} Completed",
-                         f"{len(hops_list)} hops identified and analyzed.", f"Path to {target_host} has been recorded with RTT/loss stats.")
+        nmap_xml_output = process.stdout.strip()
+        if not nmap_xml_output:
+            if not managed_stats['network'].get('dhcp_discovery_error'): # If no specific error was already set
+                error_msg = "Nmap DHCP discovery produced no XML output."
+                managed_stats['network']['dhcp_discovery_error'] = error_msg
+                add_finding_func(managed_findings, SEVERITY_MEDIUM, "Nmap DHCP Discovery No Output",
+                                error_msg, "Verify Nmap command execution and that DHCP servers are active on the network segments if expected.")
+            print(f"{COLOR_YELLOW}Warning: Nmap DHCP discovery produced no XML output.{COLOR_RESET}")
+            return
+
+        # Phase 2 (XML Parsing and Findings) will go here.
+        # For now, just storing the raw XML if successful.
+        # managed_stats['network']['dhcp_raw_xml'] = nmap_xml_output 
+        # print(f"{COLOR_GREEN}Nmap DHCP discovery completed. XML output captured. Parsing to be implemented.{COLOR_RESET}")
+
+
+    except subprocess.TimeoutExpired:
+        error_msg = f"Nmap DHCP discovery command ('{' '.join(nmap_command)}') timed out after 45 seconds."
+        managed_stats['network']['dhcp_discovery_error'] = error_msg
+        add_finding_func(managed_findings, SEVERITY_HIGH, "Nmap DHCP Discovery Timed Out",
+                         error_msg, "The network might be too large, too many offers, or Nmap is hanging. Consider adjusting timeouts or checking network conditions.")
+        print(f"{COLOR_RED}Error: {error_msg}{COLOR_RESET}")
+        return
+    except Exception as e: # Catch other unexpected errors like issues with subprocess.run itself
+        error_msg = f"An unexpected error occurred during Nmap DHCP discovery: {type(e).__name__} - {e}"
+        managed_stats['network']['dhcp_discovery_error'] = error_msg
+        add_finding_func(managed_findings, SEVERITY_HIGH, "Nmap DHCP Discovery System Error",
+                         error_msg, "Review system logs and ensure the script environment is stable.")
+        print(f"{COLOR_RED}Error: {error_msg}{COLOR_RESET}")
+        return
+
+    # --- Phase 2: XML Parsing and Findings ---
+    import xml.etree.ElementTree as ET # Added import
+
+    discovered_servers_details = []
+    try:
+        root = ET.fromstring(nmap_xml_output)
+        for host_element in root.findall('host'):
+            # The 'broadcast-dhcp-discover' script output is usually in <hostscript><script output="..."/>
+            # Sometimes it can be directly under <script output="..."/> if nmap doesn't associate it with a specific host IP (e.g. when run without host discovery -n)
+            # We will check both hostscript/script and direct script elements under root if no hosts are found.
+
+            hostscripts = host_element.find('hostscript')
+            if hostscripts is not None:
+                scripts = hostscripts.findall('script')
+            else: # Check for scripts directly under root if no hostscript (less common for this specific script)
+                scripts = host_element.findall('script') # Actually, script is usually child of host or hostscript
+
+            for script_element in scripts:
+                if script_element.get('id') == 'broadcast-dhcp-discover':
+                    script_output_text = script_element.get('output')
+                    if script_output_text:
+                        # The output is a block of text. We need to parse this.
+                        # Example: "\n  Interface: eth0\n    IP Offered: 192.168.1.100\n    DHCP Message Type: DHCPOFFER\n    Server Identifier: 192.168.1.1\n    ..."
+                        # Each DHCP offer can be a "Response X of Y" block or similar.
+                        # For simplicity, let's assume one offer per script output block for now, or parse distinct offers.
+                        # Nmap's output might group multiple offers if received from different interfaces or servers.
+                        
+                        # Split into "Response X of Y" blocks if they exist or process as a whole
+                        # A simpler approach is to look for "Server Identifier:" which is key.
+                        # Multiple offers might be in the same output string, often separated by "Response X of Y:"
+                        # Let's process the output for key fields.
+
+                        server_details = {}
+                        
+                        # Regex patterns for parsing the script output text
+                        # These need to be robust. Using re.MULTILINE for searching.
+                        # Server Identifier is the actual DHCP server's IP
+                        server_id_match = re.search(r"Server Identifier:\s*([0-9.]+)", script_output_text, re.IGNORECASE)
+                        if server_id_match:
+                            server_details['server_ip'] = server_id_match.group(1).strip()
+                        else:
+                            # If no Server Identifier, this block might not be a valid DHCP offer.
+                            # However, nmap might report the source IP of the packet as the host address.
+                            # Let's try to get the address from the <address> tag of the <host> element if server_id is missing.
+                            # This is a fallback, Server Identifier is preferred.
+                            address_element = host_element.find("address[@addrtype='ipv4']")
+                            if address_element is not None and address_element.get('addr'):
+                                server_details['server_ip_fallback'] = address_element.get('addr')
+                                # If we use this fallback, we should note it.
+                                # For now, we prioritize Server Identifier. If missing, we might skip or flag this entry.
+                                if not server_details.get('server_ip'): # Only use if primary server_ip is not found
+                                    print(f"{COLOR_YELLOW}Warning: Could not find 'Server Identifier' in DHCP offer. Using host address {server_details['server_ip_fallback']} as potential server IP.{COLOR_RESET}")
+                                    server_details['server_ip'] = server_details['server_ip_fallback']
+
+
+                        if not server_details.get('server_ip'):
+                            # If still no server_ip, this script output block is not useful for identifying a DHCP server IP.
+                            print(f"{COLOR_YELLOW}Warning: Skipping a DHCP script output block as no Server Identifier or host IP found. Output: {script_output_text[:150]}...{COLOR_RESET}")
+                            continue
+
+                        interface_match = re.search(r"Interface:\s*(\S+)", script_output_text, re.IGNORECASE)
+                        if interface_match: server_details['interface'] = interface_match.group(1).strip()
+                        
+                        ip_offered_match = re.search(r"IP Offered:\s*([0-9.]+)", script_output_text, re.IGNORECASE)
+                        if ip_offered_match: server_details['ip_offered'] = ip_offered_match.group(1).strip()
+
+                        subnet_mask_match = re.search(r"Subnet Mask:\s*([0-9.]+)", script_output_text, re.IGNORECASE)
+                        if subnet_mask_match: server_details['subnet_mask'] = subnet_mask_match.group(1).strip()
+                        
+                        router_match = re.search(r"Router:\s*([0-9.,\s]+)", script_output_text, re.IGNORECASE) # Can be multiple
+                        if router_match: server_details['router'] = router_match.group(1).strip()
+
+                        dns_match = re.search(r"Domain Name Server:\s*([0-9.,\s]+)", script_output_text, re.IGNORECASE) # Can be multiple
+                        if dns_match: server_details['dns_servers'] = dns_match.group(1).strip()
+
+                        lease_time_match = re.search(r"IP Address Lease Time:\s*(.+)", script_output_text, re.IGNORECASE)
+                        if lease_time_match: server_details['lease_time'] = lease_time_match.group(1).strip()
+                        
+                        dhcp_type_match = re.search(r"DHCP Message Type:\s*(\S+)", script_output_text, re.IGNORECASE)
+                        if dhcp_type_match: server_details['dhcp_message_type'] = dhcp_type_match.group(1).strip()
+                        
+                        # Add other fields as necessary
+                        discovered_servers_details.append(server_details)
+        
+        # If root.tag is 'nmaprun' but no 'host' elements, check for script output directly under 'runstats' or 'taskbegin/taskend' (less likely for this script)
+        # This path is typically for global script results not tied to a host.
+        # However, broadcast-dhcp-discover usually reports per "host" which is the interface it used or received on.
+        # The above loop should cover most cases. If it doesn't, the XML structure from Nmap for this script needs closer inspection.
+        # For now, we assume the host-based iteration is sufficient.
+
+    except ET.ParseError as e:
+        error_msg = f"Failed to parse Nmap XML output for DHCP discovery. Error: {e}. XML (first 500 chars): {nmap_xml_output[:500]}"
+        managed_stats['network']['dhcp_discovery_error'] = error_msg
+        add_finding_func(managed_findings, SEVERITY_HIGH, "Nmap DHCP XML Parse Error",
+                         error_msg, "Check Nmap's output format or if the XML is corrupted. Ensure Nmap version is compatible.")
+        print(f"{COLOR_RED}Error: {error_msg}{COLOR_RESET}")
+        return # Cannot proceed if XML is unparseable
+
+    if not discovered_servers_details:
+        # This means Nmap ran, produced XML, but we couldn't find any DHCP server details from the script output.
+        # Or the script found no active DHCP offers.
+        if not managed_stats['network'].get('dhcp_discovery_error'): # Only if no prior critical error
+            info_msg = "No DHCP offers were successfully parsed from the Nmap scan. This could mean no active DHCP servers responded on the broadcast segments, or the Nmap script did not detect any."
+            add_finding_func(managed_findings, SEVERITY_INFO, # Changed from LOW to INFO as it's common if no DHCP on segment
+                             "No DHCP Offers Parsed or Detected", info_msg,
+                             "If a DHCP server is expected, verify its operation and network reachability. Ensure Guardian has necessary permissions for Nmap broadcast scans.")
+            managed_stats['network']['dhcp_servers_summary'] = info_msg # Store a summary
+        print(f"{COLOR_YELLOW}Info: No DHCP server details were parsed from Nmap output.{COLOR_RESET}")
+        # We don't return here, as we want to store the (empty) discovered_servers_details list.
     
-    managed_stats['network']['traceroute_results'][target_host] = hops_list
-    print(f"{COLOR_GREEN}[+] Traceroute to {target_host} finished.{COLOR_RESET}")
+    managed_stats['network']['dhcp_servers'] = discovered_servers_details
 
-
-def _parse_rtt_string_and_calculate_stats(rtt_string, os_type, probes_sent=3):
-    """
-    Parses a string of RTT values (e.g., "10 ms  *  12 ms") and calculates stats.
-    Returns a dict with min_rtt, max_rtt, avg_rtt, packet_loss_percentage, and raw rtts.
-    """
-    rtts = []
-    rtts_parsed_for_storage = [] # Store what was parsed, including '*'
-    packets_lost = 0
-
-    parts = rtt_string.strip().split()
+    # 6. Rogue DHCP Detection
+    if not discovered_servers_details and not managed_stats['network'].get('dhcp_discovery_error'):
+        # This finding is slightly redundant with the "No DHCP Offers Parsed or Detected" INFO finding above,
+        # but more direct as per original requirements.
+        # Consider keeping only one. For now, as per step 7.
+        add_finding_func(managed_findings, SEVERITY_LOW, "No DHCP Offers Received",
+                         "No DHCP offers were received during the broadcast discovery scan.",
+                         "Verify DHCP server availability if one is expected on this network segment.")
     
-    # Windows tracert might group "<1" with "ms" as "<1 ms" or just be "*"
-    # Linux traceroute typically has "0.300 ms" or "*"
-    
-    # Temporary list to hold values before associating with 'ms' or '*'
-    temp_values = []
-    skip_next = False
-    for i, part in enumerate(parts):
-        if skip_next:
-            skip_next = False
+    for server in discovered_servers_details:
+        server_ip = server.get('server_ip')
+        if not server_ip: # Should have been caught earlier, but as a safeguard
             continue
+
+        interface_info = f"on interface {server.get('interface', 'N/A')}" if server.get('interface') else "on an undetermined interface"
         
-        if part == "*":
-            temp_values.append("*")
-        elif part.endswith("ms"):
-            val_str = part[:-2].strip() # remove "ms"
-            if val_str == "<1":
-                temp_values.append(0.5) # Represent <1 ms as 0.5 ms
-            else:
-                try: temp_values.append(float(val_str))
-                except ValueError: temp_values.append("*") # If conversion fails, treat as loss
-        elif part == "<1" and i + 1 < len(parts) and parts[i+1] == "ms": # Handle "<1 ms"
-            temp_values.append(0.5)
-            skip_next = True # Skip "ms" part
-        elif part.lower() == "request" and i + 1 < len(parts) and parts[i+1].lower() == "timed": # "Request timed out"
-            temp_values.append("*")
-            skip_next = True # Skip "timed"
-            if i + 2 < len(parts) and parts[i+2].lower() == "out.": # Skip "out."
-                skip_next = True # This logic is getting complex, simpler split by 'ms' and '*' might be better for some cases
-        else: # Assume it's a numeric part of an RTT or unhandled, try to float if it's a number
-            try: 
-                # This case is tricky, if `traceroute` output is just numbers separated by spaces without 'ms'
-                # For now, the regex is designed to capture 'ms' or '*' with the values.
-                # So, this 'else' is less likely to be hit with current regexes if they capture units.
-                # If it IS hit, and it's a number, it's an RTT. If not, it's part of something unexpected.
-                # float_val = float(part)
-                # temp_values.append(float_val)
-                pass # Let regexes handle units. If unitless numbers appear, current logic might miss them.
-            except ValueError:
-                pass # Ignore parts that are not '*' or numeric with 'ms'
-
-    # Ensure we account for the standard number of probes if parts are missing (e.g. less than 3 RTTs shown)
-    # The regex for Linux is already designed to capture up to 3 RTTs or '*'
-    # The regex for Windows also captures 3 RTT slots or '*'
-    
-    for val in temp_values:
-        if val == "*":
-            packets_lost += 1
-            rtts_parsed_for_storage.append("*")
+        if server_ip not in authorized_dhcp_servers_list:
+            desc = (f"A potentially rogue DHCP server with IP {server_ip} was detected {interface_info}. "
+                    f"It is not in the authorized list: {authorized_dhcp_servers_list if authorized_dhcp_servers_list else '(empty)'}. "
+                    f"Offered IP: {server.get('ip_offered', 'N/A')}, Subnet: {server.get('subnet_mask', 'N/A')}, "
+                    f"Router: {server.get('router', 'N/A')}, DNS: {server.get('dns_servers', 'N/A')}.")
+            add_finding_func(managed_findings, SEVERITY_CRITICAL, "Rogue DHCP Server Detected",
+                             desc,
+                             "Investigate this server immediately. Unauthorized DHCP servers can cause network disruptions, assign incorrect network configurations, or be used for man-in-the-middle attacks. Disconnect the device from the network if confirmed rogue.")
         else:
-            rtts.append(val)
-            rtts_parsed_for_storage.append(val)
-            
-    # If fewer results than probes_sent, assume remaining are lost (common if traceroute stops early for a hop)
-    # This needs to be handled carefully; if the command itself limits probes (e.g. -q 1), this is wrong.
-    # Assuming `probes_sent` is the actual number of attempts for that line.
-    # The regexes are built for 3 probes. If traceroute output format changes, this needs adjustment.
-    # For now, derive probes_sent from elements parsed if it's less than 3, but aim for 3.
-    
-    actual_probes_represented = len(rtts_parsed_for_storage)
-    if actual_probes_represented < probes_sent:
-        packets_lost += (probes_sent - actual_probes_represented)
-        rtts_parsed_for_storage.extend(["*"] * (probes_sent - actual_probes_represented))
+            desc = (f"Authorized DHCP server {server_ip} responded {interface_info}. "
+                    f"Offered IP: {server.get('ip_offered', 'N/A')}, Subnet: {server.get('subnet_mask', 'N/A')}, "
+                    f"Router: {server.get('router', 'N/A')}, DNS: {server.get('dns_servers', 'N/A')}.")
+            add_finding_func(managed_findings, SEVERITY_INFO, "Authorized DHCP Server Found", desc)
 
-
-    if not rtts: # All packets lost for this hop
-        min_rtt, max_rtt, avg_rtt = float('inf'), float('inf'), float('inf')
-    else:
-        min_rtt = min(rtts)
-        max_rtt = max(rtts)
-        avg_rtt = sum(rtts) / len(rtts)
-
-    packet_loss_percentage = (packets_lost / probes_sent) * 100 if probes_sent > 0 else 0
-
-    return {
-        'rtts_parsed': rtts_parsed_for_storage, # List of floats or '*'
-        'min_rtt': min_rtt,
-        'max_rtt': max_rtt,
-        'avg_rtt': avg_rtt,
-        'packets_lost': packets_lost,
-        'probes_sent': probes_sent, # Reflects the number of probes we attempted to parse
-        'packet_loss_percentage': packet_loss_percentage
-    }
+    print(f"{COLOR_GREEN}[+] DHCP discovery and analysis complete. Found {len(discovered_servers_details)} DHCP offer(s).{COLOR_RESET}")
