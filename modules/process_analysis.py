@@ -165,27 +165,29 @@ def get_running_processes(managed_stats, managed_findings, add_finding_func):
                 'rsyslogd', 'cron', 'dbus-daemon', 'login', 'agetty', 'auditd', 'polkitd',
                 'udevd', 'containerd', 'dockerd', 'journald'
             }
-            if proc_info['username'] == 'root' and proc_info['name'] not in expected_root_procs:
+            if proc_info_dict['username'] == 'root' and proc_info_dict['name'] not in expected_root_procs:
                 add_finding_func(
                     managed_findings, SEVERITY_LOW,
-                    f"Process Running as Root: {proc_info['name']}",
-                    f"PID: {proc_info['pid']}, Cmd: {cmdline_str}. Verify necessity.",
+                    f"Process Running as Root: {proc_info_dict['name']}",
+                    f"PID: {proc_info_dict['pid']}, Cmd: {cmdline_str}. Verify necessity.",
                     "Configure to run as less privileged user if possible."
                 )
 
             suspicious_paths = ['/tmp', '/var/tmp', '/dev/shm']
-            if proc_info['cwd'] and any(proc_info['cwd'].startswith(path) for path in suspicious_paths):
+            if proc_info_dict['cwd'] and any(proc_info_dict['cwd'].startswith(path) for path in suspicious_paths):
                  add_finding_func(
                      managed_findings, SEVERITY_MEDIUM,
-                     f"Process Running from Suspicious Location: {proc_info['name']}",
-                     f"PID: {proc_info['pid']}, CWD: {proc_info['cwd']}, User: {proc_info['username']}.",
+                     f"Process Running from Suspicious Location: {proc_info_dict['name']}",
+                     f"PID: {proc_info_dict['pid']}, CWD: {proc_info_dict['cwd']}, User: {proc_info_dict['username']}.",
                      "Investigate process origin. Could indicate malware/misconfiguration."
                  )
 
             if re.search(r'nc -l[vp]', cmdline_str) or re.search(r'ncat -l[vp]', cmdline_str):
-                 add_finding_func(managed_findings, SEVERITY_HIGH, "Potential Listener Detected (nc/ncat)", f"PID: {proc_info['pid']}, Cmd: {cmdline_str}.", "Verify legitimacy. Unauthorized listeners can be backdoors.")
+                 add_finding_func(managed_findings, SEVERITY_HIGH, "Potential Listener Detected (nc/ncat)", f"PID: {proc_info_dict['pid']}, Cmd: {cmdline_str}.", "Verify legitimacy. Unauthorized listeners can be backdoors.")
             if re.search(r'python .* SimpleHTTPServer', cmdline_str, re.IGNORECASE) or re.search(r'python -m http.server', cmdline_str):
-                 add_finding_func(managed_findings, SEVERITY_MEDIUM, "Python HTTP Server Detected", f"PID: {proc_info['pid']}, Cmd: {cmdline_str}.", "Verify intent. Simple servers lack security, may expose data.")
+                 add_finding_func(managed_findings, SEVERITY_MEDIUM, "Python HTTP Server Detected", f"PID: {proc_info_dict['pid']}, Cmd: {cmdline_str}.", "Verify intent. Simple servers lack security, may expose data.")
+            
+            processes_list_local.append(process_data)
 
     except psutil.AccessDenied:
         warning_msg = "Access denied retrieving some process details. Run as root for full info."
