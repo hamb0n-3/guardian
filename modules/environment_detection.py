@@ -12,7 +12,7 @@ import re
 import subprocess # Needed for direct call
 from modules.utils import (
     COLOR_GREEN, COLOR_RED, COLOR_YELLOW, COLOR_RESET,
-    SEVERITY_INFO, SEVERITY_MEDIUM,
+    SEVERITY_CRITICAL, SEVERITY_HIGH, SEVERITY_MEDIUM, SEVERITY_LOW, SEVERITY_INFO,
     run_command
 )
 

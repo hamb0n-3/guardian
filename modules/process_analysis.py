@@ -11,7 +11,7 @@ import socket # Already present from previous task, kept for protocol analysis
 from datetime import datetime
 from modules.utils import (
     COLOR_GREEN, COLOR_RED, COLOR_YELLOW, COLOR_RESET,
-    SEVERITY_INFO, SEVERITY_LOW, SEVERITY_MEDIUM, SEVERITY_HIGH
+    SEVERITY_CRITICAL, SEVERITY_HIGH, SEVERITY_MEDIUM, SEVERITY_LOW, SEVERITY_INFO
 )
 
 # Constants from previous task (protocol analysis) - kept for completeness of the module
@@ -80,10 +80,10 @@ def _analyze_connections(process_info, connections, add_finding_func):
                 for name_h, proto_h in PROCESS_NAME_TO_PROTOCOL_HINTS.items():
                     if name_h in proc_name: suspected_protocol_by_proc = proto_h; break
                 if suspected_protocol_by_proc and suspected_protocol_by_proc != current_port_protocol and not (current_port_protocol in suspected_protocol_by_proc or suspected_protocol_by_proc in current_port_protocol):
-                     add_finding_func(managed_findings, SEVERITY_MEDIUM, f"Potential Protocol Mismatch on Port {lport} for PID {process_info.get('pid')}", f"Process '{proc_name}' (PID: {process_info.get('pid')}) is using port {lport} (typically {current_port_protocol}), but process name suggests it might be {suspected_protocol_by_proc}. Status: {conn.status}.", "Verify the process and its configuration.")
+                     add_finding_func(SEVERITY_MEDIUM, f"Potential Protocol Mismatch on Port {lport} for PID {process_info.get('pid')}", f"Process '{proc_name}' (PID: {process_info.get('pid')}) is using port {lport} (typically {current_port_protocol}), but process name suggests it might be {suspected_protocol_by_proc}. Status: {conn.status}.", "Verify the process and its configuration.")
         analyzed_conns.append(conn_data)
     if unknown_protocol_count > 3 and unknown_protocol_count >= len(connections) / 2:
-        add_finding_func(managed_findings, SEVERITY_LOW, f"Process with Multiple Unknown Protocols: {proc_name} (PID {process_info.get('pid')})", f"Process '{proc_name}' (PID: {process_info.get('pid')}) has {unknown_protocol_count} connections with undetermined protocols out of {len(connections)} total.", "Review this process's network activity.")
+        add_finding_func(SEVERITY_LOW, f"Process with Multiple Unknown Protocols: {proc_name} (PID {process_info.get('pid')})", f"Process '{proc_name}' (PID: {process_info.get('pid')}) has {unknown_protocol_count} connections with undetermined protocols out of {len(connections)} total.", "Review this process's network activity.")
     return analyzed_conns
 
 def get_running_processes(managed_stats, managed_findings, add_finding_func):
@@ -123,7 +123,7 @@ def get_running_processes(managed_stats, managed_findings, add_finding_func):
                 if (isinstance(process_data["bytes_sent"], int) and process_data["bytes_sent"] > HIGH_TRAFFIC_THRESHOLD_BYTES) or \
                    (isinstance(process_data["bytes_read"], int) and process_data["bytes_read"] > HIGH_TRAFFIC_THRESHOLD_BYTES):
                     add_finding_func(
-                        managed_findings, SEVERITY_MEDIUM,
+                        SEVERITY_MEDIUM,
                         f"High I/O Volume for Process: {proc_info_dict['name']}",
                         f"PID: {proc_info_dict['pid']}, Name: {proc_info_dict['name']}, User: {proc_info_dict['username']} "
                         f"has written {process_data['bytes_sent']:,} bytes and read {process_data['bytes_read']:,} bytes (total I/O).",
@@ -167,7 +167,7 @@ def get_running_processes(managed_stats, managed_findings, add_finding_func):
             }
             if proc_info_dict['username'] == 'root' and proc_info_dict['name'] not in expected_root_procs:
                 add_finding_func(
-                    managed_findings, SEVERITY_LOW,
+                    SEVERITY_LOW,
                     f"Process Running as Root: {proc_info_dict['name']}",
                     f"PID: {proc_info_dict['pid']}, Cmd: {cmdline_str}. Verify necessity.",
                     "Configure to run as less privileged user if possible."
@@ -176,28 +176,28 @@ def get_running_processes(managed_stats, managed_findings, add_finding_func):
             suspicious_paths = ['/tmp', '/var/tmp', '/dev/shm']
             if proc_info_dict['cwd'] and any(proc_info_dict['cwd'].startswith(path) for path in suspicious_paths):
                  add_finding_func(
-                     managed_findings, SEVERITY_MEDIUM,
+                     SEVERITY_MEDIUM,
                      f"Process Running from Suspicious Location: {proc_info_dict['name']}",
                      f"PID: {proc_info_dict['pid']}, CWD: {proc_info_dict['cwd']}, User: {proc_info_dict['username']}.",
                      "Investigate process origin. Could indicate malware/misconfiguration."
                  )
 
             if re.search(r'nc -l[vp]', cmdline_str) or re.search(r'ncat -l[vp]', cmdline_str):
-                 add_finding_func(managed_findings, SEVERITY_HIGH, "Potential Listener Detected (nc/ncat)", f"PID: {proc_info_dict['pid']}, Cmd: {cmdline_str}.", "Verify legitimacy. Unauthorized listeners can be backdoors.")
+                 add_finding_func(SEVERITY_HIGH, "Potential Listener Detected (nc/ncat)", f"PID: {proc_info_dict['pid']}, Cmd: {cmdline_str}.", "Verify legitimacy. Unauthorized listeners can be backdoors.")
             if re.search(r'python .* SimpleHTTPServer', cmdline_str, re.IGNORECASE) or re.search(r'python -m http.server', cmdline_str):
-                 add_finding_func(managed_findings, SEVERITY_MEDIUM, "Python HTTP Server Detected", f"PID: {proc_info_dict['pid']}, Cmd: {cmdline_str}.", "Verify intent. Simple servers lack security, may expose data.")
+                 add_finding_func(SEVERITY_MEDIUM, "Python HTTP Server Detected", f"PID: {proc_info_dict['pid']}, Cmd: {cmdline_str}.", "Verify intent. Simple servers lack security, may expose data.")
             
             processes_list_local.append(process_data)
 
     except psutil.AccessDenied:
         warning_msg = "Access denied retrieving some process details. Run as root for full info."
         print(f"{COLOR_YELLOW}Warning: {warning_msg}{COLOR_RESET}")
-        add_finding_func(managed_findings, SEVERITY_LOW, "Process Scan Permissions Issue", warning_msg)
+        add_finding_func(SEVERITY_LOW, "Process Scan Permissions Issue", warning_msg)
         process_stats_local['error'] = warning_msg
     except Exception as e:
         error_msg = f"Failed to gather process info: {e}"
         print(f"{COLOR_RED}Error gathering running processes: {e}{COLOR_RESET}")
-        add_finding_func(managed_findings, SEVERITY_HIGH, "Process Info Error", error_msg)
+        add_finding_func(SEVERITY_HIGH, "Process Info Error", error_msg)
         process_stats_local['error'] = error_msg
 
     # Update managed stats
